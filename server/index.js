@@ -1,8 +1,8 @@
 const path = require('path');
 const express = require('express');
-const { db, getSetting, setSetting } = require('./db');
+const { db, getSetting, setSetting, getWeekLockTime, isWeekLocked } = require('./db');
 const { fetchWeek } = require('./espn');
-const { computeWeek, computeSeasonStandings } = require('./scoring');
+const { computeWeek, computeSeasonStandings, computeBoard } = require('./scoring');
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'changeme';
 const PORT = process.env.PORT || 3000;
@@ -25,6 +25,33 @@ function currentSeasonWeek() {
   return { season, week };
 }
 
+// ---- Live updates (Server-Sent Events) ----
+// Any time picks, tiebreakers, the schedule, or admin settings change, every
+// connected browser gets pinged so open tabs (like the Winner Board) refresh
+// themselves without anyone hitting reload.
+const sseClients = new Set();
+
+function broadcastUpdate(type) {
+  const payload = `event: update\ndata: ${JSON.stringify({ type, at: Date.now() })}\n\n`;
+  for (const res of sseClients) res.write(payload);
+}
+
+app.get('/api/stream', (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.flushHeaders();
+  res.write('retry: 3000\n\n');
+  sseClients.add(res);
+  const heartbeat = setInterval(() => res.write(':hb\n\n'), 25000);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+  });
+});
+
 // ---- App state ----
 app.get('/api/state', (req, res) => {
   const { season, week } = currentSeasonWeek();
@@ -36,6 +63,7 @@ app.post('/api/admin/state', requireAdmin, (req, res) => {
   if (season !== undefined) setSetting('current_season', season);
   if (week !== undefined) setSetting('current_week', week);
   if (buyIn !== undefined) setSetting('buy_in', buyIn);
+  broadcastUpdate('state');
   res.json({ ok: true });
 });
 
@@ -52,6 +80,7 @@ app.post('/api/admin/users', requireAdmin, (req, res) => {
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
   try {
     const info = db.prepare('INSERT INTO users (name) VALUES (?)').run(name.trim());
+    broadcastUpdate('users');
     res.json({ id: info.lastInsertRowid, name: name.trim() });
   } catch (err) {
     res.status(400).json({ error: 'That name already exists' });
@@ -60,18 +89,21 @@ app.post('/api/admin/users', requireAdmin, (req, res) => {
 
 app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
   db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+  broadcastUpdate('users');
   res.json({ ok: true });
 });
 
 // ---- Games ----
+// The whole week's picks (and the tiebreaker) lock together at the kickoff
+// of the week's first game - not per-game - so nobody can wait to see early
+// Sunday results before picking the late games.
 app.get('/api/weeks/:season/:week/games', (req, res) => {
   const { season, week } = req.params;
   const games = db
     .prepare('SELECT * FROM games WHERE season = ? AND week = ? ORDER BY kickoff ASC')
     .all(season, week);
-  const now = new Date();
-  const withLock = games.map((g) => ({ ...g, locked: new Date(g.kickoff) <= now }));
-  res.json(withLock);
+  const locked = isWeekLocked(Number(season), Number(week));
+  res.json(games.map((g) => ({ ...g, locked })));
 });
 
 app.post('/api/admin/weeks/:season/:week/sync', requireAdmin, async (req, res) => {
@@ -79,6 +111,7 @@ app.post('/api/admin/weeks/:season/:week/sync', requireAdmin, async (req, res) =
   const seasontype = req.body?.seasontype || 2;
   try {
     const count = await fetchWeek(Number(season), Number(week), Number(seasontype));
+    broadcastUpdate('sync');
     res.json({ ok: true, gamesSynced: count });
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -87,21 +120,21 @@ app.post('/api/admin/weeks/:season/:week/sync', requireAdmin, async (req, res) =
 
 // ---- Picks ----
 // Returns picks for a week. A given user's own picks are always included;
-// other users' picks are only revealed for games that have already locked
-// (kicked off), so nobody can copy an unlocked pick.
+// everyone else's picks stay hidden until the whole week locks, so nobody
+// can copy a pick before making their own.
 app.get('/api/weeks/:season/:week/picks', (req, res) => {
   const { season, week } = req.params;
   const viewerId = Number(req.query.userId) || null;
+  const locked = isWeekLocked(Number(season), Number(week));
   const rows = db
     .prepare(
-      `SELECT p.id, p.user_id, p.game_id, p.picked_abbr, g.kickoff
+      `SELECT p.user_id, p.game_id, p.picked_abbr
        FROM picks p JOIN games g ON g.id = p.game_id
        WHERE g.season = ? AND g.week = ?`
     )
     .all(season, week);
-  const now = new Date();
   const visible = rows
-    .filter((r) => r.user_id === viewerId || new Date(r.kickoff) <= now)
+    .filter((r) => r.user_id === viewerId || locked)
     .map((r) => ({ userId: r.user_id, gameId: r.game_id, pickedAbbr: r.picked_abbr }));
   res.json(visible);
 });
@@ -113,8 +146,8 @@ app.post('/api/picks', (req, res) => {
   }
   const game = db.prepare('SELECT * FROM games WHERE id = ?').get(gameId);
   if (!game) return res.status(404).json({ error: 'Game not found' });
-  if (new Date(game.kickoff) <= new Date()) {
-    return res.status(403).json({ error: 'This game has already locked' });
+  if (isWeekLocked(game.season, game.week)) {
+    return res.status(403).json({ error: "This week's picks are locked - the first game has already started" });
   }
   if (pickedAbbr !== game.home_abbr && pickedAbbr !== game.away_abbr) {
     return res.status(400).json({ error: 'pickedAbbr must be one of the two teams' });
@@ -125,6 +158,7 @@ app.post('/api/picks', (req, res) => {
      ON CONFLICT(user_id, game_id) DO UPDATE SET
        picked_abbr = excluded.picked_abbr, updated_at = excluded.updated_at`
   ).run(userId, gameId, pickedAbbr);
+  broadcastUpdate('picks');
   res.json({ ok: true });
 });
 
@@ -132,10 +166,7 @@ app.post('/api/picks', (req, res) => {
 app.get('/api/weeks/:season/:week/tiebreakers', (req, res) => {
   const { season, week } = req.params;
   const viewerId = Number(req.query.userId) || null;
-  const mnf = db
-    .prepare('SELECT * FROM games WHERE season = ? AND week = ? AND is_mnf = 1')
-    .get(season, week);
-  const locked = mnf ? new Date(mnf.kickoff) <= new Date() : false;
+  const locked = isWeekLocked(Number(season), Number(week));
   const rows = db
     .prepare('SELECT user_id, guess_points FROM tiebreakers WHERE season = ? AND week = ?')
     .all(season, week);
@@ -154,8 +185,8 @@ app.post('/api/tiebreakers', (req, res) => {
     .prepare('SELECT * FROM games WHERE season = ? AND week = ? AND is_mnf = 1')
     .get(season, week);
   if (!mnf) return res.status(400).json({ error: 'No Monday Night game found for this week' });
-  if (new Date(mnf.kickoff) <= new Date()) {
-    return res.status(403).json({ error: 'The Monday Night game has already locked' });
+  if (isWeekLocked(Number(season), Number(week))) {
+    return res.status(403).json({ error: "This week's picks are locked - the first game has already started" });
   }
   db.prepare(
     `INSERT INTO tiebreakers (user_id, season, week, guess_points, updated_at)
@@ -163,6 +194,7 @@ app.post('/api/tiebreakers', (req, res) => {
      ON CONFLICT(user_id, season, week) DO UPDATE SET
        guess_points = excluded.guess_points, updated_at = excluded.updated_at`
   ).run(userId, season, week, guessPoints);
+  broadcastUpdate('tiebreaker');
   res.json({ ok: true });
 });
 
@@ -174,6 +206,20 @@ app.get('/api/weeks/:season/:week/results', (req, res) => {
 
 app.get('/api/standings/:season', (req, res) => {
   res.json(computeSeasonStandings(Number(req.params.season)));
+});
+
+// ---- Winner Board ----
+// A shared, real-time view of everyone's picks for the week. Only exposed
+// once the week is locked, so it can never leak an unlocked pick.
+app.get('/api/weeks/:season/:week/board', (req, res) => {
+  const season = Number(req.params.season);
+  const week = Number(req.params.week);
+  const lockTime = getWeekLockTime(season, week);
+  const locked = lockTime !== null && new Date(lockTime) <= new Date();
+  if (!locked) {
+    return res.json({ locked: false, lockTime });
+  }
+  res.json({ locked: true, lockTime, ...computeBoard(season, week) });
 });
 
 app.post('/api/admin/login', (req, res) => {

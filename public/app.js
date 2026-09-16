@@ -35,8 +35,21 @@ async function init() {
   bindTopbar();
   bindTabs();
   bindAdminModal();
+  bindLiveUpdates();
   if (state.adminPassword) document.getElementById('adminTabBtn').hidden = false;
   render();
+}
+
+// Live updates via Server-Sent Events: whenever anyone picks, syncs the
+// schedule, or changes settings, every open browser re-renders its current
+// tab automatically - no manual refresh needed.
+function bindLiveUpdates() {
+  if (typeof EventSource === 'undefined') return;
+  const dot = document.getElementById('liveDot');
+  const es = new EventSource('/api/stream');
+  es.addEventListener('open', () => { if (dot) dot.hidden = false; });
+  es.addEventListener('error', () => { if (dot) dot.hidden = true; });
+  es.addEventListener('update', () => render());
 }
 
 async function refreshState() {
@@ -116,6 +129,7 @@ function switchTab(tab) {
 // ---------- rendering ----------
 async function render() {
   if (state.tab === 'week') return renderWeekTab();
+  if (state.tab === 'board') return renderBoardTab();
   if (state.tab === 'results') return renderResultsTab();
   if (state.tab === 'standings') return renderStandingsTab();
   if (state.tab === 'admin') return renderAdminTab();
@@ -174,7 +188,9 @@ async function renderWeekTab() {
           ${teamButton(g.away_abbr, g.away_team, g.away_score, false)}
           ${teamButton(g.home_abbr, g.home_team, g.home_score, true)}
         </div>
-        ${g.locked ? `<div class="locked-note">🔒 Locked${isFinal ? ' — final' : ' — in progress'}</div>` : ''}
+        ${g.locked ? `<div class="locked-note">🔒 Locked${
+          g.status === 'final' ? ' — final' : g.status === 'in_progress' ? ' — in progress' : ' — not started yet'
+        }</div>` : ''}
         ${othersHtml}
       </div>`;
   });
@@ -194,16 +210,24 @@ async function renderWeekTab() {
           <button id="tiebreakerSubmit" ${locked || !state.userId ? 'disabled' : ''}>Save guess</button>
         </div>
         ${locked ? `<span class="locked-note">🔒 Locked — actual total: ${
-          mnfGame.status === 'final' ? mnfGame.home_score + mnfGame.away_score : 'game in progress'
+          mnfGame.status === 'final'
+            ? mnfGame.home_score + mnfGame.away_score
+            : mnfGame.status === 'in_progress' ? 'game in progress' : 'game not started yet'
         }</span>` : ''}
       </div>`;
   }
 
+  const weekLocked = games[0]?.locked;
+  const lockNote = weekLocked
+    ? '🔒 All picks for this week are locked.'
+    : `Picks lock at kickoff of the first game (${fmtKickoff(games[0].kickoff)}) — after that, no changes.`;
+
   app.innerHTML = `
-    <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
       <div><strong>Season ${season} — Week ${week}</strong></div>
-      ${!state.userId ? '<span class="muted">Pick your name above to make picks</span>' : ''}
+      <span class="muted">${lockNote}</span>
     </div>
+    ${!state.userId ? '<p class="empty-state">Pick your name above to make picks</p>' : ''}
     ${cards.join('')}
     ${tiebreakerHtml}
   `;
@@ -242,6 +266,76 @@ async function renderWeekTab() {
       }
     });
   }
+}
+
+async function renderBoardTab() {
+  app.innerHTML = '<p class="empty-state">Loading…</p>';
+  const { season, week } = state;
+  const board = await api(`/api/weeks/${season}/${week}/board`);
+
+  if (!board.locked) {
+    const when = board.lockTime ? fmtKickoff(board.lockTime) : null;
+    app.innerHTML = `<div class="card">
+      <strong>Winner Board</strong>
+      <p class="muted" style="margin-top:8px">
+        ${when
+          ? `Everyone's picks are hidden until this week locks at kickoff of the first game (${when}). Check back then to see the whole group's board update live as games finish.`
+          : 'No games loaded for this week yet.'}
+      </p>
+    </div>`;
+    return;
+  }
+
+  if (board.games.length === 0 || board.rows.length === 0) {
+    app.innerHTML = '<p class="empty-state">Nothing to show yet.</p>';
+    return;
+  }
+
+  const gameHeaders = board.games
+    .map(
+      (g) => `<th>
+        <div class="board-game-header">
+          <span>${escapeHtml(g.away_abbr)} @ ${escapeHtml(g.home_abbr)}</span>
+          ${g.status === 'final' ? `<span class="score">${g.away_score}-${g.home_score}</span>` : `<span class="score">${escapeHtml(g.status.replace('_', ' '))}</span>`}
+        </div>
+      </th>`
+    )
+    .join('');
+
+  const rows = board.rows
+    .map((row) => {
+      const cells = board.games
+        .map((g) => {
+          const pick = row.picks[g.id];
+          if (!pick) return '<td class="pick-missing">—</td>';
+          let cls = 'pick-pending';
+          if (g.status === 'final' && g.winner_abbr) {
+            cls = pick === g.winner_abbr ? 'pick-correct' : 'pick-wrong';
+          }
+          return `<td class="${cls}">${escapeHtml(pick)}</td>`;
+        })
+        .join('');
+      return `<tr>
+        <td class="player-col">${escapeHtml(row.name)}</td>
+        ${cells}
+        <td><strong>${row.correct}/${board.finalCount}</strong></td>
+        <td>${row.tiebreakerGuess ?? '—'}</td>
+      </tr>`;
+    })
+    .join('');
+
+  app.innerHTML = `
+    <div class="card">
+      <strong>Winner Board — Season ${season}, Week ${week}</strong>
+      <span class="muted" style="margin-left:8px">Live — updates automatically as picks and scores come in</span>
+    </div>
+    <div class="card board-table-wrap">
+      <table class="board">
+        <thead><tr><th class="player-col">Player</th>${gameHeaders}<th>Correct</th><th>MNF guess</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
 }
 
 async function renderResultsTab() {

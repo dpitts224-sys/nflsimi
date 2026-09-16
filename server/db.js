@@ -68,4 +68,19 @@ function setSetting(key, value) {
   ).run(key, String(value));
 }
 
-module.exports = { db, getSetting, setSetting };
+// All picks and the tiebreaker for a week lock together at the kickoff of
+// that week's FIRST game, not per-game - matching a standard pick 'em pool
+// where your whole slate is due before the week starts.
+function getWeekLockTime(season, week) {
+  const row = db
+    .prepare('SELECT MIN(kickoff) AS lockTime FROM games WHERE season = ? AND week = ?')
+    .get(season, week);
+  return row?.lockTime || null;
+}
+
+function isWeekLocked(season, week) {
+  const lockTime = getWeekLockTime(season, week);
+  return lockTime !== null && new Date(lockTime) <= new Date();
+}
+
+module.exports = { db, getSetting, setSetting, getWeekLockTime, isWeekLocked };

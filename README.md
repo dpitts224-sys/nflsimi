@@ -10,9 +10,17 @@ who wins the week if there's a tie).
 
 - **Auto-loaded schedule & scores** — pulls each week's matchups and final
   scores from ESPN's public scoreboard, no manual data entry.
-- **Pick 'em** — everyone clicks the team they think will win each game.
-  Picks lock automatically at kickoff, and other players' picks stay hidden
-  until their game locks (so nobody can copy).
+- **Pick 'em, one sheet per player** — everyone picks their name and clicks a
+  winner for each game. Each player has exactly one set of picks per week
+  (enforced by the database, not just the UI), and it's locked in — including
+  the tiebreaker — the moment the week's *first* game kicks off, not
+  game-by-game. That means you can't wait to see Sunday's early games before
+  picking the late ones.
+- **Winner Board** — an optional shared view where everyone can see the
+  whole group's picks side-by-side, correct/incorrect highlighted as games
+  finish. It's only visible once the week is locked (so it can never leak an
+  unlocked pick), and it updates in real time for everyone watching — no
+  refresh needed — as people pick and as scores come in.
 - **Monday Night tiebreaker** — a dedicated box to guess the combined total
   points of the Monday night game; used to break ties on correct-pick count.
 - **Weekly results** — correct-pick counts per player, the week's winner(s),
@@ -50,11 +58,14 @@ ADMIN_PASSWORD=your-password PORT=3000 npm start
    automatically).
 2. Share the link with the group. Everyone picks their name from the
    dropdown in the top bar and clicks a winner for each game, plus fills in
-   their Monday Night total-points guess.
-3. As games finish, re-sync the week (Admin tab) to pull final scores —
-   the **Results** tab updates automatically: correct-pick counts, the
-   week's winner(s), and the pot split.
-4. The **Season Standings** tab tracks weekly wins and total correct picks
+   their Monday Night total-points guess — before the week's first game
+   kicks off, since that's when everything locks.
+3. Once locked, anyone can open the **Winner Board** tab to see the whole
+   group's picks together, live.
+4. As games finish, re-sync the week (Admin tab) to pull final scores —
+   the **Results** tab and the **Winner Board** update automatically:
+   correct-pick counts, the week's winner(s), and the pot split.
+5. The **Season Standings** tab tracks weekly wins and total correct picks
    across the whole season.
 
 Tie-breaking rule: the player(s) with the most correct picks wins the week.

@@ -115,4 +115,53 @@ function computeSeasonStandings(season) {
   return { season, standings, weeklyBreakdown };
 }
 
-module.exports = { computeWeek, computeSeasonStandings };
+// Full pick matrix for the "Winner Board" - every player's pick on every
+// game, plus their running correct count. Callers must only expose this
+// once the week is locked (see isWeekLocked in db.js).
+function computeBoard(season, week) {
+  const games = db
+    .prepare('SELECT * FROM games WHERE season = ? AND week = ? ORDER BY kickoff ASC')
+    .all(season, week);
+  const users = db.prepare('SELECT id, name FROM users ORDER BY name COLLATE NOCASE').all();
+  const picks = db
+    .prepare(
+      `SELECT p.user_id, p.game_id, p.picked_abbr FROM picks p
+       JOIN games g ON g.id = p.game_id
+       WHERE g.season = ? AND g.week = ?`
+    )
+    .all(season, week);
+  const tiebreakers = db
+    .prepare('SELECT user_id, guess_points FROM tiebreakers WHERE season = ? AND week = ?')
+    .all(season, week);
+
+  const rows = users.map((user) => {
+    const userPicks = {};
+    let correct = 0;
+    for (const g of games) {
+      const p = picks.find((pk) => pk.user_id === user.id && pk.game_id === g.id);
+      userPicks[g.id] = p ? p.picked_abbr : null;
+      if (p && g.status === 'final' && g.winner_abbr && p.picked_abbr === g.winner_abbr) {
+        correct += 1;
+      }
+    }
+    const tb = tiebreakers.find((t) => t.user_id === user.id);
+    return {
+      userId: user.id,
+      name: user.name,
+      picks: userPicks,
+      tiebreakerGuess: tb ? tb.guess_points : null,
+      correct,
+    };
+  });
+
+  rows.sort((a, b) => b.correct - a.correct);
+
+  return {
+    games,
+    rows,
+    finalCount: games.filter((g) => g.status === 'final').length,
+    totalGames: games.length,
+  };
+}
+
+module.exports = { computeWeek, computeSeasonStandings, computeBoard };

@@ -162,3 +162,30 @@ tr.winner-row td { color: #ffd75e; font-weight: 700; }
 .error { color: var(--danger); font-size: 0.85rem; min-height: 1em; margin: 0; }
 .muted { color: var(--muted); }
 .empty-state { color: var(--muted); text-align: center; padding: 40px 0; }
+
+.live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6bd196;
+  margin-left: 4px;
+  box-shadow: 0 0 0 0 rgba(107, 209, 150, 0.6);
+  animation: live-pulse 1.6s infinite;
+}
+@keyframes live-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(107, 209, 150, 0.6); }
+  70% { box-shadow: 0 0 0 6px rgba(107, 209, 150, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(107, 209, 150, 0); }
+}
+
+.board-table-wrap { overflow-x: auto; }
+table.board { border-collapse: collapse; white-space: nowrap; }
+table.board th, table.board td { padding: 8px 10px; text-align: center; border-bottom: 1px solid var(--border); }
+table.board th.player-col, table.board td.player-col { text-align: left; position: sticky; left: 0; background: var(--panel); }
+table.board td.pick-correct { color: #6bd196; font-weight: 700; }
+table.board td.pick-wrong { color: #e88; text-decoration: line-through; opacity: 0.8; }
+table.board td.pick-pending { color: var(--text); }
+table.board td.pick-missing { color: var(--muted); font-style: italic; }
+.board-game-header { display: flex; flex-direction: column; align-items: center; font-weight: 600; }
+.board-game-header .score { color: var(--muted); font-weight: 400; font-size: 0.75rem; }
