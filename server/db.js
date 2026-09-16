@@ -1,139 +1,105 @@
-const path = require('path');
 const crypto = require('crypto');
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data.sqlite');
-const db = new Database(DB_PATH);
-
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS groups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    admin_password_hash TEXT NOT NULL,
-    admin_password_salt TEXT NOT NULL,
-    current_season INTEGER NOT NULL,
-    current_week INTEGER NOT NULL DEFAULT 1,
-    buy_in INTEGER NOT NULL DEFAULT 10,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+if (!process.env.DATABASE_URL) {
+  throw new Error(
+    'DATABASE_URL is not set. Create a free Postgres database (e.g. at neon.tech) and set ' +
+      'DATABASE_URL to its connection string before starting the server.'
   );
-
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS games (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    season INTEGER NOT NULL,
-    week INTEGER NOT NULL,
-    espn_id TEXT NOT NULL UNIQUE,
-    home_team TEXT NOT NULL,
-    away_team TEXT NOT NULL,
-    home_abbr TEXT NOT NULL,
-    away_abbr TEXT NOT NULL,
-    kickoff TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'scheduled',
-    home_score INTEGER,
-    away_score INTEGER,
-    winner_abbr TEXT,
-    is_mnf INTEGER NOT NULL DEFAULT 0
-  );
-
-  CREATE TABLE IF NOT EXISTS picks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
-    picked_abbr TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(user_id, game_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS tiebreakers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    season INTEGER NOT NULL,
-    week INTEGER NOT NULL,
-    guess_points INTEGER NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(user_id, season, week)
-  );
-`);
-
-// --- Migration: old single-tenant installs had a global `users` table with
-// UNIQUE(name) and no group_id, plus a generic `settings` key/value table
-// for the current season/week/buy-in. If we detect that shape, fold
-// everything into one auto-created "Migrated Group" rather than losing data.
-function columnExists(table, column) {
-  return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
 }
 
-function tableExists(name) {
-  return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?").get(name);
+const isLocalDb = /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL);
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // Managed Postgres providers (Neon, Heroku, etc.) terminate TLS with certs
+  // that aren't always in Node's default trust store - this is the standard,
+  // widely-used way to connect to them without bundling a CA file. Skipped
+  // for local development databases, which typically don't speak TLS at all.
+  ssl: isLocalDb ? false : { rejectUnauthorized: false },
+});
+
+// better-sqlite3 used `?` placeholders; keep that style everywhere else in
+// the app and just translate to Postgres's `$1, $2, ...` here.
+function toPgSql(sql) {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
 }
 
-function migrateLegacySingleGroupSchema() {
-  if (columnExists('users', 'group_id')) return; // already on the new schema
+async function all(sql, params = []) {
+  const res = await pool.query(toPgSql(sql), params);
+  return res.rows;
+}
 
-  const migrate = db.transaction(() => {
-    const legacyUsers = db.prepare('SELECT id, name, created_at FROM users').all();
-    const legacySettings = tableExists('settings')
-      ? db.prepare('SELECT key, value FROM settings').all()
-      : [];
-    const settingsMap = Object.fromEntries(legacySettings.map((s) => [s.key, s.value]));
+async function get(sql, params = []) {
+  const rows = await all(sql, params);
+  return rows[0] || null;
+}
 
-    db.exec('ALTER TABLE users RENAME TO users_legacy');
-    db.exec(`
-      CREATE TABLE users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
-        name TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-      )
-    `);
+// For INSERT/UPDATE/DELETE. Returns { rowCount, rows } - add `RETURNING ...`
+// to the SQL when you need values back (e.g. a newly inserted id).
+async function run(sql, params = []) {
+  const res = await pool.query(toPgSql(sql), params);
+  return { rowCount: res.rowCount, rows: res.rows };
+}
 
-    if (legacyUsers.length > 0) {
-      const tempPassword = generateGroupCode(); // reuse the same friendly alphabet for a temp password
-      const { hash, salt } = hashPassword(tempPassword);
-      const code = generateGroupCode();
-      const info = db
-        .prepare(
-          `INSERT INTO groups (code, name, admin_password_hash, admin_password_salt, current_season, current_week, buy_in)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          code,
-          'Migrated Group',
-          hash,
-          salt,
-          Number(settingsMap.current_season) || new Date().getFullYear(),
-          Number(settingsMap.current_week) || 1,
-          Number(settingsMap.buy_in) || 10
-        );
-      const groupId = info.lastInsertRowid;
-      const insertUser = db.prepare(
-        'INSERT INTO users (id, group_id, name, created_at) VALUES (?, ?, ?, ?)'
-      );
-      for (const u of legacyUsers) insertUser.run(u.id, groupId, u.name, u.created_at);
+async function initSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS groups (
+      id SERIAL PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      admin_password_hash TEXT NOT NULL,
+      admin_password_salt TEXT NOT NULL,
+      current_season INTEGER NOT NULL,
+      current_week INTEGER NOT NULL DEFAULT 1,
+      buy_in INTEGER NOT NULL DEFAULT 10,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
 
-      console.log('='.repeat(60));
-      console.log('Migrated pre-existing players into a new group:');
-      console.log(`  Group code:      ${code}`);
-      console.log(`  Admin password:  ${tempPassword}`);
-      console.log('Log in with these once, then treat them as you would any group.');
-      console.log('='.repeat(60));
-    }
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
 
-    db.exec('DROP TABLE users_legacy');
-    if (tableExists('settings')) db.exec('DROP TABLE settings');
-  });
+    CREATE TABLE IF NOT EXISTS games (
+      id SERIAL PRIMARY KEY,
+      season INTEGER NOT NULL,
+      week INTEGER NOT NULL,
+      espn_id TEXT NOT NULL UNIQUE,
+      home_team TEXT NOT NULL,
+      away_team TEXT NOT NULL,
+      home_abbr TEXT NOT NULL,
+      away_abbr TEXT NOT NULL,
+      kickoff TIMESTAMPTZ NOT NULL,
+      status TEXT NOT NULL DEFAULT 'scheduled',
+      home_score INTEGER,
+      away_score INTEGER,
+      winner_abbr TEXT,
+      is_mnf INTEGER NOT NULL DEFAULT 0
+    );
 
-  migrate();
+    CREATE TABLE IF NOT EXISTS picks (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+      picked_abbr TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(user_id, game_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS tiebreakers (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      season INTEGER NOT NULL,
+      week INTEGER NOT NULL,
+      guess_points INTEGER NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(user_id, season, week)
+    );
+  `);
 }
 
 // --- Password hashing (scrypt - no extra native dependency needed) ---
@@ -152,11 +118,11 @@ function verifyPassword(password, hash, salt) {
 // --- Group codes: short, shareable, no ambiguous characters (no 0/O/1/I) ---
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
-function generateGroupCode() {
+async function generateGroupCode() {
   let code;
   do {
     code = Array.from({ length: 6 }, () => CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)]).join('');
-  } while (db.prepare('SELECT 1 FROM groups WHERE code = ?').get(code));
+  } while (await get('SELECT 1 FROM groups WHERE code = ?', [code]));
   return code;
 }
 
@@ -164,22 +130,25 @@ function generateGroupCode() {
 // that week's FIRST game, not per-game - matching a standard pick 'em pool
 // where your whole slate is due before the week starts. Games (and
 // therefore lock times) are shared across every group.
-function getWeekLockTime(season, week) {
-  const row = db
-    .prepare('SELECT MIN(kickoff) AS lockTime FROM games WHERE season = ? AND week = ?')
-    .get(season, week);
+async function getWeekLockTime(season, week) {
+  const row = await get('SELECT MIN(kickoff) AS "lockTime" FROM games WHERE season = ? AND week = ?', [
+    season,
+    week,
+  ]);
   return row?.lockTime || null;
 }
 
-function isWeekLocked(season, week) {
-  const lockTime = getWeekLockTime(season, week);
+async function isWeekLocked(season, week) {
+  const lockTime = await getWeekLockTime(season, week);
   return lockTime !== null && new Date(lockTime) <= new Date();
 }
 
-migrateLegacySingleGroupSchema();
-
 module.exports = {
-  db,
+  pool,
+  all,
+  get,
+  run,
+  initSchema,
   hashPassword,
   verifyPassword,
   generateGroupCode,

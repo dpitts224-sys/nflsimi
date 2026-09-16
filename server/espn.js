@@ -1,4 +1,4 @@
-const { db } = require('./db');
+const { run } = require('./db');
 
 const SCOREBOARD_URL =
   'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
@@ -60,43 +60,36 @@ async function fetchWeek(season, week, seasontype = 2) {
     ).espnId;
   }
 
-  const upsert = db.prepare(`
-    INSERT INTO games (
-      season, week, espn_id, home_team, away_team, home_abbr, away_abbr,
-      kickoff, status, home_score, away_score, winner_abbr, is_mnf
-    ) VALUES (
-      @season, @week, @espnId, @homeTeam, @awayTeam, @homeAbbr, @awayAbbr,
-      @kickoff, @status, @homeScore, @awayScore, @winnerAbbr, @isMnf
-    )
-    ON CONFLICT(espn_id) DO UPDATE SET
-      kickoff = excluded.kickoff,
-      status = excluded.status,
-      home_score = excluded.home_score,
-      away_score = excluded.away_score,
-      winner_abbr = excluded.winner_abbr,
-      is_mnf = excluded.is_mnf
-  `);
-
-  const tx = db.transaction((games) => {
-    for (const g of games) {
-      upsert.run({
+  for (const g of parsed) {
+    await run(
+      `INSERT INTO games (
+         season, week, espn_id, home_team, away_team, home_abbr, away_abbr,
+         kickoff, status, home_score, away_score, winner_abbr, is_mnf
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(espn_id) DO UPDATE SET
+         kickoff = excluded.kickoff,
+         status = excluded.status,
+         home_score = excluded.home_score,
+         away_score = excluded.away_score,
+         winner_abbr = excluded.winner_abbr,
+         is_mnf = excluded.is_mnf`,
+      [
         season,
         week,
-        espnId: g.espnId,
-        homeTeam: g.homeTeam,
-        awayTeam: g.awayTeam,
-        homeAbbr: g.homeAbbr,
-        awayAbbr: g.awayAbbr,
-        kickoff: g.kickoff,
-        status: g.status,
-        homeScore: g.homeScore,
-        awayScore: g.awayScore,
-        winnerAbbr: g.winnerAbbr,
-        isMnf: g.espnId === mnfEspnId ? 1 : 0,
-      });
-    }
-  });
-  tx(parsed);
+        g.espnId,
+        g.homeTeam,
+        g.awayTeam,
+        g.homeAbbr,
+        g.awayAbbr,
+        g.kickoff,
+        g.status,
+        g.homeScore,
+        g.awayScore,
+        g.winnerAbbr,
+        g.espnId === mnfEspnId ? 1 : 0,
+      ]
+    );
+  }
 
   return parsed.length;
 }

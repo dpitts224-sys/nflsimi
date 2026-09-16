@@ -42,16 +42,18 @@ but everything else - who's playing, who picked what, the season standings
 
 ## Running it
 
-Requires Node.js 18+ (22 recommended - see `.node-version`).
+Requires Node.js 18+ and a Postgres database (a free one from
+[neon.tech](https://neon.tech) works well - see **Deploying** below for
+the full walkthrough).
 
 ```bash
 npm install
+cp .env.example .env   # then paste your DATABASE_URL in
 npm start
 ```
 
-Open http://localhost:3000. Data is stored in a local `data.sqlite` file
-(created automatically). There's no environment variable to configure to
-get started - each group sets its own admin password when it's created.
+Open http://localhost:3000. There's no admin password to configure up
+front - each group sets its own when it's created.
 
 ## Weekly workflow
 
@@ -82,48 +84,60 @@ pot is split evenly among the remaining tied players.
 
 ## Deploying so everyone can reach it
 
-### Option A: Render (easiest, free, no credit card)
+The app itself runs on Render's free tier, but its data lives in a
+**separate, genuinely persistent Postgres database** (a free one from
+Neon) rather than a local file. This matters: Render's free web services
+don't just sleep after 15 minutes of inactivity, they spin back up on a
+**fresh container** on the next visit - anything written to local disk
+(like a SQLite file) is gone at that point. A real database elsewhere
+doesn't have that problem.
 
-This repo includes a `render.yaml` blueprint, so deploying is a few clicks:
+### Step 1: create a free Neon Postgres database
+
+1. Go to [neon.tech](https://neon.tech) and create a free account/project
+   (no credit card required).
+2. Once the project's created, copy its **connection string** (Neon shows
+   this on the project dashboard - it looks like
+   `postgres://user:password@ep-xxxx.neon.tech/neondb?sslmode=require`).
+   Keep this handy for the next step.
+
+### Step 2: deploy the app to Render
+
+This repo includes a `render.yaml` blueprint:
 
 1. Click **Deploy to Render**:
    [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/dpitts224-sys/nflsimi/tree/claude/nfl-pick-em-simulator-0fwee9)
 2. Sign in to Render (or create a free account) and connect your GitHub —
-   Render will read `render.yaml` and pre-fill everything (no environment
-   variables to set - each group's admin password is set in the app itself).
-3. Click **Apply** / **Create Web Service**. In a minute or two you'll get a
+   Render will read `render.yaml` and pre-fill everything.
+3. When it asks for the `DATABASE_URL` environment variable, paste in the
+   Neon connection string from Step 1.
+4. Click **Apply** / **Create Web Service**. In a minute or two you'll get a
    live URL like `https://nfl-pick-em-xxxx.onrender.com` — open it, create
    your group, and share the link + your group's code with everyone.
 
-Two things worth knowing about Render's free tier:
-- The service **spins down after 15 minutes of no traffic** and takes a
-  few seconds to wake back up on the next visit — a non-issue for a
-  once-a-week pool, just don't be surprised by a slow first load.
-- The free tier has no persistent disk, so `data.sqlite` survives restarts
-  and sleep/wake cycles, but is **wiped on a new deploy** (i.e. whenever
-  this code is updated and redeployed). For a single season this is
-  usually fine since you won't be redeploying mid-season; if you want data
-  to survive redeploys too, add a $1/mo 1GB disk in the Render dashboard
-  (Settings → Disks) and set the `DB_PATH` env var to a path under it.
+One thing worth knowing about Render's free tier: the service still spins
+down after 15 minutes of no traffic and takes a few seconds to wake back
+up on the next visit. That's harmless now (your data isn't going anywhere)
+- just don't be surprised by a slow first load once in a while.
 
 If you'd rather not use the button, the manual steps are: on render.com,
 **New → Web Service**, connect the `dpitts224-sys/nflsimi` repo, build
-command `npm install`, start command `npm start`.
+command `npm install`, start command `npm start`, add the `DATABASE_URL`
+env var.
 
-### Option B: your own always-on machine
+### Alternative: your own always-on machine
 
-Just run `npm start` there and share the machine's address, or set up a
-free tunnel like [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
-or [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) so the group can
-reach it from outside your network. Data lives on real disk here, so
-nothing ever gets wiped.
+Run `npm start` there (pointed at any Postgres, including one running
+locally) and share the machine's address, or set up a free tunnel like
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+or [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) so the group
+can reach it from outside your network.
 
-### Option C: another host (Railway, Fly.io, etc.)
+### Alternative: another host (Railway, Fly.io, etc.)
 
 Works the same way anywhere Node runs: point the host at this repo, build
-with `npm install`, start with `npm start`, and attach persistent storage
-if the platform supports it (needed for `data.sqlite` to survive
-restarts/redeploys long-term).
+with `npm install`, start with `npm start`, and set `DATABASE_URL` to your
+Neon (or other Postgres) connection string.
 
 ## Notes / things you may want to tweak
 
@@ -142,7 +156,3 @@ restarts/redeploys long-term).
   would need `seasontype=3` — easiest way to handle that today is passing
   `{"seasontype": 3}` in the sync request body (the Admin UI only exposes
   regular season sync, but the API supports it).
-- Upgrading from an older single-group version of this app migrates your
-  existing players/settings automatically into a "Migrated Group" the
-  first time it starts up (see `migrateLegacySingleGroupSchema` in
-  `server/db.js`) - check the server logs for its auto-generated code.
