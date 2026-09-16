@@ -75,17 +75,50 @@ pot is split evenly among the remaining tied players.
 
 ## Deploying so everyone can reach it
 
-This is a small single-process Node app with a local SQLite file, so it
-runs anywhere Node runs:
+### Option A: Render (easiest, free, no credit card)
 
-- **A free web host** (e.g. Render, Railway, Fly.io): point it at this repo,
-  set the `ADMIN_PASSWORD` environment variable, run `npm install && npm
-  start`, and attach a small persistent disk/volume so `data.sqlite`
-  survives restarts/redeploys.
-- **A home server / Raspberry Pi / always-on PC**: just run `npm start`
-  there and share the machine's address (or set up a free tunnel like
-  Cloudflare Tunnel or Tailscale so your dad's group can reach it from
-  outside your network).
+This repo includes a `render.yaml` blueprint, so deploying is a few clicks:
+
+1. Click **Deploy to Render**:
+   [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/dpitts224-sys/nflsimi/tree/claude/nfl-pick-em-simulator-0fwee9)
+2. Sign in to Render (or create a free account) and connect your GitHub —
+   Render will read `render.yaml` and pre-fill everything.
+3. When it asks for the `ADMIN_PASSWORD` environment variable, set it to
+   something only you know.
+4. Click **Apply** / **Create Web Service**. In a minute or two you'll get a
+   live URL like `https://nfl-pick-em-xxxx.onrender.com` — that's the link
+   to share with the group.
+
+Two things worth knowing about Render's free tier:
+- The service **spins down after 15 minutes of no traffic** and takes a
+  few seconds to wake back up on the next visit — a non-issue for a
+  once-a-week pool, just don't be surprised by a slow first load.
+- The free tier has no persistent disk, so `data.sqlite` survives restarts
+  and sleep/wake cycles, but is **wiped on a new deploy** (i.e. whenever
+  this code is updated and redeployed). For a single season this is
+  usually fine since you won't be redeploying mid-season; if you want data
+  to survive redeploys too, add a $1/mo 1GB disk in the Render dashboard
+  (Settings → Disks) and set the `DB_PATH` env var to a path under it.
+
+If you'd rather not use the button, the manual steps are: on render.com,
+**New → Web Service**, connect the `dpitts224-sys/nflsimi` repo, build
+command `npm install`, start command `npm start`, add the `ADMIN_PASSWORD`
+env var.
+
+### Option B: your own always-on machine
+
+Just run `npm start` there and share the machine's address, or set up a
+free tunnel like [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+or [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) so the group can
+reach it from outside your network. Data lives on real disk here, so
+nothing ever gets wiped.
+
+### Option C: another host (Railway, Fly.io, etc.)
+
+Works the same way anywhere Node runs: point the host at this repo, set
+`ADMIN_PASSWORD`, build with `npm install`, start with `npm start`, and
+attach persistent storage if the platform supports it (needed for
+`data.sqlite` to survive restarts/redeploys long-term).
 
 ## Notes / things you may want to tweak
 
