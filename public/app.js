@@ -505,9 +505,12 @@ async function renderWeekTab() {
     : `Picks lock at kickoff of the first game (${fmtKickoff(games[0].kickoff)}) — after that, no changes.`;
 
   app.innerHTML = `
-    <div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
-      <div><strong>Season ${season} — Week ${week}</strong></div>
-      <span class="muted">${lockNote}</span>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+        <strong>Season ${season} — Week ${week}</strong>
+        <span class="muted">${lockNote}</span>
+      </div>
+      <p class="page-hint">Pick a winner for every game below (and guess the Monday Night combined score) before the week's first kickoff — after that, your picks are locked in for good.</p>
     </div>
     ${!state.userId ? '<p class="empty-state">Add your name above to make picks</p>' : ''}
     ${cards.join('')}
@@ -611,6 +614,7 @@ async function renderBoardTab() {
     <div class="card">
       <strong>Winner Board — Season ${season}, Week ${week}</strong>
       <span class="muted" style="margin-left:8px">Live — updates automatically as picks and scores come in</span>
+      <p class="page-hint">See everyone in your group's picks side by side, with correct/incorrect highlighted as each game finishes.</p>
     </div>
     <div class="card board-table-wrap">
       <table class="board">
@@ -653,6 +657,7 @@ async function renderResultsTab() {
       <div class="muted" style="margin-top:4px">
         ${r.allGamesFinal ? potNote : `In progress — ${r.games.filter((g) => g.status === 'final').length}/${r.games.length} games final`}
       </div>
+      <p class="page-hint">See who's correctly picked the most games this week, and how the pot splits once every game is final.</p>
     </div>
     <div class="card">
       <table>
@@ -694,6 +699,7 @@ async function renderStandingsTab() {
   app.innerHTML = `
     <div class="card">
       <strong>Season ${s.season} Standings</strong>
+      <p class="page-hint">Track each player's cumulative weekly wins and total correct picks across the whole season.</p>
       <table style="margin-top:10px">
         <thead><tr><th>#</th><th>Player</th><th>Weekly wins 🏆</th><th>Total correct picks</th></tr></thead>
         <tbody>${rows.join('')}</tbody>
@@ -708,6 +714,7 @@ async function renderStandingsTab() {
 
 async function renderAdminTab() {
   app.innerHTML = `
+    <p class="page-hint" style="margin-bottom:16px">Set the current season/week and buy-in, sync each week's real NFL schedule, and remove players if needed — all admin-only actions for this group.</p>
     <div class="card admin-section">
       <strong>Group</strong>
       <div class="admin-row">
