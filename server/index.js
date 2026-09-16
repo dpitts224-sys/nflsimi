@@ -8,6 +8,7 @@ const {
   hashPassword,
   verifyPassword,
   generateGroupCode,
+  generatePasscode,
   getWeekLockTime,
   isWeekLocked,
 } = require('./db');
@@ -86,11 +87,17 @@ function requireGroupAdmin(req, res, next) {
   next();
 }
 
-// A user id passed in a request body must actually belong to the group in
-// the URL - otherwise anyone who can guess a user id from another group
-// could pick or view on their behalf.
-async function userBelongsToGroup(userId, groupId) {
-  return !!(await get('SELECT 1 FROM users WHERE id = ? AND group_id = ?', [userId, groupId]));
+// Proves a request claiming to be player `userId` is actually coming from
+// someone who holds that player's passcode - not just anyone in the group
+// who knows their name/id (both are visible to every group member via the
+// player list, so id alone proves nothing).
+async function verifyPlayerAccess(userId, groupId, passcode) {
+  const user = await get('SELECT passcode_hash, passcode_salt FROM users WHERE id = ? AND group_id = ?', [
+    userId,
+    groupId,
+  ]);
+  if (!user || !user.passcode_hash) return false; // no passcode set = no access, not "anyone's welcome"
+  return verifyPassword(passcode || '', user.passcode_hash, user.passcode_salt);
 }
 
 // ---- Groups ----
@@ -162,14 +169,38 @@ app.post('/api/groups/:code/users', loadGroup, h(async (req, res) => {
     trimmed,
   ]);
   if (existing) {
-    return res.status(400).json({ error: 'Someone in this group already has that name - try adding an initial' });
+    return res.status(400).json({
+      error: "Someone in this group already has that name - if that's you, use \"Restore access\" with your passcode instead",
+    });
   }
-  const info = await run('INSERT INTO users (group_id, name) VALUES (?, ?) RETURNING id', [
-    req.group.id,
-    trimmed,
-  ]);
+  const passcode = generatePasscode();
+  const { hash, salt } = hashPassword(passcode);
+  const info = await run(
+    'INSERT INTO users (group_id, name, passcode_hash, passcode_salt) VALUES (?, ?, ?, ?) RETURNING id',
+    [req.group.id, trimmed, hash, salt]
+  );
   broadcastUpdate(req.group.id, 'users');
-  res.json({ id: info.rows[0].id, name: trimmed });
+  // The passcode is only ever shown here, at creation - store it now,
+  // because there's no way to recover it later (only reset it by
+  // rejoining, which an admin removal + a fresh join effectively does).
+  res.json({ id: info.rows[0].id, name: trimmed, passcode });
+}));
+
+// Restores access to an existing player identity on a new device/browser,
+// given their name + the passcode they were shown when they first joined.
+// Doesn't rotate the passcode, so it keeps working on every other device
+// that already has it too.
+app.post('/api/groups/:code/restore', loadGroup, h(async (req, res) => {
+  const { name, passcode } = req.body;
+  if (!name || !passcode) return res.status(400).json({ error: 'Name and passcode are required' });
+  const user = await get('SELECT id, name, passcode_hash, passcode_salt FROM users WHERE group_id = ? AND LOWER(name) = LOWER(?)', [
+    req.group.id,
+    name.trim(),
+  ]);
+  if (!user || !user.passcode_hash || !verifyPassword(passcode, user.passcode_hash, user.passcode_salt)) {
+    return res.status(401).json({ error: 'Name or passcode is incorrect' });
+  }
+  res.json({ id: user.id, name: user.name, passcode });
 }));
 
 app.delete('/api/groups/:code/users/:id', loadGroup, requireGroupAdmin, h(async (req, res) => {
@@ -206,12 +237,15 @@ app.post('/api/groups/:code/admin/weeks/:season/:week/sync', loadGroup, requireG
 }));
 
 // ---- Picks ----
-// Returns picks for a week. A given user's own picks are always included;
-// everyone else's in the SAME group stays hidden until the whole week
-// locks, so nobody can copy a pick before making their own.
+// Returns picks for a week. A given user's own picks are only included if
+// the request proves it's really them (their passcode) - otherwise
+// everyone's picks stay hidden until the whole week locks, so nobody can
+// peek at or copy a pick before making their own.
 app.get('/api/groups/:code/weeks/:season/:week/picks', loadGroup, h(async (req, res) => {
   const { season, week } = req.params;
   const viewerId = Number(req.query.userId) || null;
+  const isVerifiedViewer =
+    viewerId && (await verifyPlayerAccess(viewerId, req.group.id, req.query.passcode));
   const locked = await isWeekLocked(Number(season), Number(week));
   const rows = await all(
     `SELECT p.user_id, p.game_id, p.picked_abbr
@@ -222,18 +256,18 @@ app.get('/api/groups/:code/weeks/:season/:week/picks', loadGroup, h(async (req, 
     [season, week, req.group.id]
   );
   const visible = rows
-    .filter((r) => r.user_id === viewerId || locked)
+    .filter((r) => (isVerifiedViewer && r.user_id === viewerId) || locked)
     .map((r) => ({ userId: r.user_id, gameId: r.game_id, pickedAbbr: r.picked_abbr }));
   res.json(visible);
 }));
 
 app.post('/api/groups/:code/picks', loadGroup, h(async (req, res) => {
-  const { userId, gameId, pickedAbbr } = req.body;
+  const { userId, gameId, pickedAbbr, passcode } = req.body;
   if (!userId || !gameId || !pickedAbbr) {
     return res.status(400).json({ error: 'userId, gameId, and pickedAbbr are required' });
   }
-  if (!(await userBelongsToGroup(userId, req.group.id))) {
-    return res.status(403).json({ error: 'That player is not in this group' });
+  if (!(await verifyPlayerAccess(userId, req.group.id, passcode))) {
+    return res.status(403).json({ error: 'Invalid player credentials' });
   }
   const game = await get('SELECT * FROM games WHERE id = ?', [gameId]);
   if (!game) return res.status(404).json({ error: 'Game not found' });
@@ -258,6 +292,8 @@ app.post('/api/groups/:code/picks', loadGroup, h(async (req, res) => {
 app.get('/api/groups/:code/weeks/:season/:week/tiebreakers', loadGroup, h(async (req, res) => {
   const { season, week } = req.params;
   const viewerId = Number(req.query.userId) || null;
+  const isVerifiedViewer =
+    viewerId && (await verifyPlayerAccess(viewerId, req.group.id, req.query.passcode));
   const locked = await isWeekLocked(Number(season), Number(week));
   const rows = await all(
     `SELECT t.user_id, t.guess_points
@@ -267,18 +303,18 @@ app.get('/api/groups/:code/weeks/:season/:week/tiebreakers', loadGroup, h(async 
     [season, week, req.group.id]
   );
   const visible = rows
-    .filter((r) => r.user_id === viewerId || locked)
+    .filter((r) => (isVerifiedViewer && r.user_id === viewerId) || locked)
     .map((r) => ({ userId: r.user_id, guessPoints: r.guess_points }));
   res.json(visible);
 }));
 
 app.post('/api/groups/:code/tiebreakers', loadGroup, h(async (req, res) => {
-  const { userId, season, week, guessPoints } = req.body;
+  const { userId, season, week, guessPoints, passcode } = req.body;
   if (!userId || !season || !week || guessPoints === undefined) {
     return res.status(400).json({ error: 'userId, season, week, and guessPoints are required' });
   }
-  if (!(await userBelongsToGroup(userId, req.group.id))) {
-    return res.status(403).json({ error: 'That player is not in this group' });
+  if (!(await verifyPlayerAccess(userId, req.group.id, passcode))) {
+    return res.status(403).json({ error: 'Invalid player credentials' });
   }
   const mnf = await get('SELECT * FROM games WHERE season = ? AND week = ? AND is_mnf = 1', [
     season,

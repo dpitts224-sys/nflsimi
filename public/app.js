@@ -6,6 +6,7 @@ const state = {
   buyIn: 0,
   users: [],
   userId: null,
+  passcode: null,
   adminPassword: null,
   tab: 'week',
   eventSource: null,
@@ -42,8 +43,35 @@ function escapeHtml(str) {
   }[c]));
 }
 
-function userStorageKey(code) { return `pickem_user_${code}`; }
 function adminStorageKey(code) { return `pickem_admin_${code}`; }
+function identitiesStorageKey(code) { return `pickem_identities_${code}`; }
+function activeIdStorageKey(code) { return `pickem_active_${code}`; }
+
+// Identities are the players THIS BROWSER holds valid passcodes for in a
+// given group - not the group's full roster (that's state.users). A device
+// can hold more than one (e.g. a shared family computer where a couple
+// people each joined once and now just switch between themselves).
+function loadIdentities(code) {
+  try { return JSON.parse(localStorage.getItem(identitiesStorageKey(code)) || '[]'); }
+  catch { return []; }
+}
+
+function saveIdentity(code, user) {
+  const list = loadIdentities(code).filter((u) => u.id !== user.id);
+  list.push(user);
+  localStorage.setItem(identitiesStorageKey(code), JSON.stringify(list));
+  localStorage.setItem(activeIdStorageKey(code), String(user.id));
+}
+
+function getActiveIdentity(code) {
+  const list = loadIdentities(code);
+  const activeId = Number(localStorage.getItem(activeIdStorageKey(code)));
+  return list.find((u) => u.id === activeId) || list[0] || null;
+}
+
+function setActiveIdentity(code, id) {
+  localStorage.setItem(activeIdStorageKey(code), String(id));
+}
 
 // ---------- bootstrap ----------
 async function init() {
@@ -51,7 +79,6 @@ async function init() {
   bindTopbar();
   bindTabs();
   bindAdminModal();
-  bindJoinModal();
 
   if (state.groupCode) {
     const ok = await enterGroup(state.groupCode, { skipHistoryUpdate: true });
@@ -85,8 +112,10 @@ async function enterGroup(code, opts = {}) {
 
   await refreshUsers();
 
-  const saved = JSON.parse(localStorage.getItem(userStorageKey(state.groupCode)) || 'null');
-  state.userId = saved && state.users.some((u) => u.id === saved.id) ? saved.id : null;
+  const active = getActiveIdentity(state.groupCode);
+  const stillInGroup = active && state.users.some((u) => u.id === active.id);
+  state.userId = stillInGroup ? active.id : null;
+  state.passcode = stillInGroup ? active.passcode : null;
 
   connectLiveUpdates();
   showMainApp();
@@ -114,6 +143,7 @@ function leaveGroup() {
   state.groupCode = null;
   state.groupName = null;
   state.userId = null;
+  state.passcode = null;
   state.adminPassword = null;
   document.getElementById('topbarControls').hidden = true;
   document.getElementById('tabsNav').hidden = true;
@@ -225,44 +255,91 @@ async function refreshUsers() {
 function populateUserSelect() {
   const sel = document.getElementById('userSelect');
   if (!sel) return;
+  // Only identities THIS device has valid passcodes for - not the group's
+  // whole roster - so switching the dropdown can never "become" someone
+  // else without their passcode.
+  const mine = loadIdentities(state.groupCode).filter((u) => state.users.some((su) => su.id === u.id));
   sel.innerHTML =
-    state.users.map((u) => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join('') +
-    `<option value="__new__">+ Add my name</option>`;
+    mine.map((u) => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join('') +
+    `<option value="__new__">+ Add / restore access</option>`;
   if (state.userId) sel.value = state.userId;
   else sel.value = '__new__';
 }
 
-// ---------- join modal (self-service "add my name") ----------
+// ---------- join modal (self-service "add my name" + "restore access") ----------
+function joinModalFormHtml() {
+  return `
+    <h3>What's your name?</h3>
+    <input id="joinNameInput" type="text" placeholder="e.g. Steve" maxlength="40" />
+    <input id="joinPasscodeInput" type="text" placeholder="Passcode (if returning)"
+      maxlength="8" style="text-transform:uppercase;letter-spacing:0.08em" />
+    <span class="muted" style="font-size:0.78rem">Leave the passcode blank if this is your first time joining.</span>
+    <div class="modal-actions">
+      <button id="joinCancel" class="ghost">Cancel</button>
+      <button id="joinSubmit">Continue</button>
+    </div>
+    <p id="joinError" class="error"></p>
+  `;
+}
+
 function openJoinModal({ dismissible = true } = {}) {
-  const modal = document.getElementById('joinModal');
-  document.getElementById('joinNameInput').value = '';
-  document.getElementById('joinError').textContent = '';
+  const box = document.querySelector('#joinModal .modal-box');
+  box.innerHTML = joinModalFormHtml();
   document.getElementById('joinCancel').hidden = !dismissible;
-  modal.classList.remove('hidden');
+  document.getElementById('joinCancel').addEventListener('click', () => {
+    document.getElementById('joinModal').classList.add('hidden');
+    populateUserSelect();
+  });
+  document.getElementById('joinSubmit').addEventListener('click', submitJoinOrRestore);
+  document.getElementById('joinModal').classList.remove('hidden');
   document.getElementById('joinNameInput').focus();
 }
 
-function bindJoinModal() {
-  const modal = document.getElementById('joinModal');
-  document.getElementById('joinCancel').addEventListener('click', () => {
-    modal.classList.add('hidden');
-    populateUserSelect();
-  });
-  document.getElementById('joinSubmit').addEventListener('click', async () => {
-    const name = document.getElementById('joinNameInput').value.trim();
-    if (!name) return;
-    try {
-      const user = await groupApi('/users', { method: 'POST', body: JSON.stringify({ name }) });
-      state.userId = user.id;
-      localStorage.setItem(userStorageKey(state.groupCode), JSON.stringify(user));
-      await refreshUsers();
-      modal.classList.add('hidden');
+async function submitJoinOrRestore() {
+  const name = document.getElementById('joinNameInput').value.trim();
+  const passcode = document.getElementById('joinPasscodeInput').value.trim().toUpperCase();
+  if (!name) return;
+  try {
+    const user = passcode
+      ? await groupApi('/restore', { method: 'POST', body: JSON.stringify({ name, passcode }) })
+      : await groupApi('/users', { method: 'POST', body: JSON.stringify({ name }) });
+    saveIdentity(state.groupCode, user);
+    state.userId = user.id;
+    state.passcode = user.passcode;
+    await refreshUsers();
+    if (user.passcode && !passcode) {
+      showPasscodeReveal(user.name, user.passcode);
+    } else {
+      document.getElementById('joinModal').classList.add('hidden');
       render();
-    } catch (err) {
-      document.getElementById('joinError').textContent = err.message;
     }
+  } catch (err) {
+    document.getElementById('joinError').textContent = err.message;
+  }
+}
+
+// Shown exactly once, right after a fresh join - this passcode is never
+// shown again, so make it hard to miss and easy to copy.
+function showPasscodeReveal(name, passcode) {
+  const box = document.querySelector('#joinModal .modal-box');
+  box.innerHTML = `
+    <h3>You're in, ${escapeHtml(name)}!</h3>
+    <p class="muted">Save this passcode - it's the only way to access your picks from a different
+      device later. We'll remember you automatically here, so you won't need it on this device.</p>
+    <div class="code-reveal">${escapeHtml(passcode)}</div>
+    <div class="modal-actions">
+      <button id="passcodeOk">Got it</button>
+    </div>
+  `;
+  document.getElementById('passcodeOk').addEventListener('click', () => {
+    document.getElementById('joinModal').classList.add('hidden');
+    render();
   });
 }
+
+// Form bindings for the join/restore modal are (re)attached each time
+// openJoinModal() rebuilds its contents, since restoring/joining swaps
+// that HTML out - see openJoinModal() and showPasscodeReveal() above.
 
 function bindTopbar() {
   document.getElementById('userSelect').addEventListener('change', (e) => {
@@ -270,9 +347,13 @@ function bindTopbar() {
       openJoinModal({ dismissible: true });
       return;
     }
-    state.userId = Number(e.target.value);
-    const user = state.users.find((u) => u.id === state.userId);
-    if (user) localStorage.setItem(userStorageKey(state.groupCode), JSON.stringify(user));
+    const id = Number(e.target.value);
+    const identity = loadIdentities(state.groupCode).find((u) => u.id === id);
+    if (identity) {
+      state.userId = identity.id;
+      state.passcode = identity.passcode;
+      setActiveIdentity(state.groupCode, identity.id);
+    }
     render();
   });
   document.getElementById('adminBtn').addEventListener('click', () => {
@@ -338,10 +419,11 @@ async function render() {
 async function renderWeekTab() {
   app.innerHTML = '<p class="empty-state">Loading…</p>';
   const { season, week } = state;
+  const idQuery = `userId=${state.userId || ''}&passcode=${encodeURIComponent(state.passcode || '')}`;
   const [games, picks, tiebreakers] = await Promise.all([
     groupApi(`/weeks/${season}/${week}/games`),
-    groupApi(`/weeks/${season}/${week}/picks?userId=${state.userId || ''}`),
-    groupApi(`/weeks/${season}/${week}/tiebreakers?userId=${state.userId || ''}`),
+    groupApi(`/weeks/${season}/${week}/picks?${idQuery}`),
+    groupApi(`/weeks/${season}/${week}/tiebreakers?${idQuery}`),
   ]);
 
   if (games.length === 0) {
@@ -439,6 +521,7 @@ async function renderWeekTab() {
           method: 'POST',
           body: JSON.stringify({
             userId: state.userId,
+            passcode: state.passcode,
             gameId: Number(btn.dataset.game),
             pickedAbbr: btn.dataset.abbr,
           }),
@@ -458,7 +541,7 @@ async function renderWeekTab() {
       try {
         await groupApi('/tiebreakers', {
           method: 'POST',
-          body: JSON.stringify({ userId: state.userId, season, week, guessPoints: val }),
+          body: JSON.stringify({ userId: state.userId, passcode: state.passcode, season, week, guessPoints: val }),
         });
         renderWeekTab();
       } catch (err) {

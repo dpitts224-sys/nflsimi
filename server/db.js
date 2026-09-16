@@ -61,6 +61,8 @@ async function initSchema() {
       id SERIAL PRIMARY KEY,
       group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
+      passcode_hash TEXT,
+      passcode_salt TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
@@ -100,6 +102,12 @@ async function initSchema() {
       UNIQUE(user_id, season, week)
     );
   `);
+
+  // Migration for deployments that predate per-player passcodes.
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS passcode_hash TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS passcode_salt TEXT;
+  `);
 }
 
 // --- Password hashing (scrypt - no extra native dependency needed) ---
@@ -124,6 +132,14 @@ async function generateGroupCode() {
     code = Array.from({ length: 6 }, () => CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)]).join('');
   } while (await get('SELECT 1 FROM groups WHERE code = ?', [code]));
   return code;
+}
+
+// A private per-player passcode, shown once when they join. It's what
+// proves a pick/tiebreaker request is really coming from that player (not
+// just anyone in the group who knows their name), and what lets them
+// restore access from a different device later - no email/SMS needed.
+function generatePasscode() {
+  return Array.from({ length: 8 }, () => CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)]).join('');
 }
 
 // All picks and the tiebreaker for a week lock together at the kickoff of
@@ -152,6 +168,7 @@ module.exports = {
   hashPassword,
   verifyPassword,
   generateGroupCode,
+  generatePasscode,
   getWeekLockTime,
   isWeekLocked,
 };

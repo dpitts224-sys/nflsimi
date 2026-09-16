@@ -141,10 +141,23 @@ Neon (or other Postgres) connection string.
 
 ## Notes / things you may want to tweak
 
-- Anyone who knows a group's code can join it and pick under any name -
-  there's no per-player password. That matches a low-stakes friend group;
-  a group's *admin* actions (sync, settings, removing players) do require
-  that group's admin password, set when the group was created.
+- **Picks and the tiebreaker lock for good once the week's first game
+  kicks off** - enforced entirely server-side (the server independently
+  re-derives lock status from the real kickoff time on every request), so
+  there's no client-side trick that reopens it.
+- **Each player gets a private passcode** when they join (shown once) that's
+  required to submit or view their own not-yet-locked picks - so nobody in
+  the group can pick, peek at picks early, or otherwise act as another
+  player just by knowing their name (which is otherwise public within the
+  group). Browsers remember it automatically after joining; typing the same
+  name + passcode again on a different device restores access there too, and
+  doesn't invalidate it anywhere else. There's still no *admin*-level login
+  per player, by design - joining and picking stays a one-field "what's your
+  name?" for the common case.
+- Losing a passcode means losing that identity - there's no recovery besides
+  an admin removing that player so they can rejoin fresh (which resets their
+  picks). Not a concern season-to-season since nothing needs re-entering
+  once you're in, but worth knowing.
 - Once someone's created or joined a group in their browser, reopening the
   same link remembers their group and name (via localStorage) - "Switch
   group" in the top bar clears that if they need to join a different pool.

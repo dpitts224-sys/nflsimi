@@ -39,16 +39,11 @@
     </div>
   </div>
 
+  <!-- Contents are built dynamically by openJoinModal()/showPasscodeReveal()
+       in app.js, since it's reused for joining, restoring access, and the
+       one-time passcode reveal. -->
   <div id="joinModal" class="modal hidden">
-    <div class="modal-box">
-      <h3>What's your name?</h3>
-      <input id="joinNameInput" type="text" placeholder="e.g. Steve" maxlength="40" />
-      <div class="modal-actions">
-        <button id="joinCancel" class="ghost">Cancel</button>
-        <button id="joinSubmit">Join</button>
-      </div>
-      <p id="joinError" class="error"></p>
-    </div>
+    <div class="modal-box"></div>
   </div>
 
   <script src="app.js"></script>
