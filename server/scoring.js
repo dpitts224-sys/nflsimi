@@ -1,0 +1,118 @@
+const { db } = require('./db');
+
+// Computes the weekly results: each user's correct-pick count, their MNF
+// tiebreaker guess, and who won the week (most correct picks, ties broken by
+// closeness to the actual Monday Night combined score).
+function computeWeek(season, week) {
+  const games = db
+    .prepare('SELECT * FROM games WHERE season = ? AND week = ? ORDER BY kickoff ASC')
+    .all(season, week);
+
+  const users = db.prepare('SELECT id, name FROM users ORDER BY name COLLATE NOCASE').all();
+  const finalGames = games.filter((g) => g.status === 'final');
+  const mnfGame = games.find((g) => g.is_mnf === 1);
+  const mnfFinal = mnfGame && mnfGame.status === 'final';
+  const mnfActualTotal = mnfFinal ? mnfGame.home_score + mnfGame.away_score : null;
+
+  const allPicks = db
+    .prepare(
+      `SELECT p.*, g.winner_abbr, g.status FROM picks p
+       JOIN games g ON g.id = p.game_id
+       WHERE g.season = ? AND g.week = ?`
+    )
+    .all(season, week);
+
+  const tiebreakers = db
+    .prepare('SELECT * FROM tiebreakers WHERE season = ? AND week = ?')
+    .all(season, week);
+
+  const results = users.map((user) => {
+    const userPicks = allPicks.filter((p) => p.user_id === user.id);
+    const correct = userPicks.filter(
+      (p) => p.status === 'final' && p.winner_abbr && p.picked_abbr === p.winner_abbr
+    ).length;
+    const pickedCount = userPicks.length;
+    const tb = tiebreakers.find((t) => t.user_id === user.id);
+    const guess = tb ? tb.guess_points : null;
+    const diff =
+      guess !== null && mnfActualTotal !== null ? Math.abs(guess - mnfActualTotal) : null;
+
+    return {
+      userId: user.id,
+      name: user.name,
+      correct,
+      pickedCount,
+      tiebreakerGuess: guess,
+      tiebreakerDiff: diff,
+    };
+  });
+
+  const allGamesFinal = games.length > 0 && finalGames.length === games.length;
+
+  let winnerIds = [];
+  if (allGamesFinal) {
+    const withPicks = results.filter((r) => r.pickedCount > 0);
+    if (withPicks.length > 0) {
+      const maxCorrect = Math.max(...withPicks.map((r) => r.correct));
+      let top = withPicks.filter((r) => r.correct === maxCorrect);
+      if (top.length > 1 && mnfActualTotal !== null) {
+        const withGuess = top.filter((r) => r.tiebreakerDiff !== null);
+        if (withGuess.length > 0) {
+          const minDiff = Math.min(...withGuess.map((r) => r.tiebreakerDiff));
+          top = withGuess.filter((r) => r.tiebreakerDiff === minDiff);
+        }
+      }
+      winnerIds = top.map((r) => r.userId);
+    }
+  }
+
+  return {
+    season,
+    week,
+    games,
+    mnfGame: mnfGame || null,
+    mnfActualTotal,
+    allGamesFinal,
+    results: results.sort((a, b) => b.correct - a.correct),
+    winnerIds,
+  };
+}
+
+function computeSeasonStandings(season) {
+  const weeks = db
+    .prepare('SELECT DISTINCT week FROM games WHERE season = ? ORDER BY week ASC')
+    .all(season)
+    .map((r) => r.week);
+
+  const users = db.prepare('SELECT id, name FROM users ORDER BY name COLLATE NOCASE').all();
+  const totals = new Map(
+    users.map((u) => [u.id, { userId: u.id, name: u.name, weeklyWins: 0, totalCorrect: 0 }])
+  );
+
+  const weeklyBreakdown = [];
+  for (const week of weeks) {
+    const weekResult = computeWeek(season, week);
+    for (const r of weekResult.results) {
+      const t = totals.get(r.userId);
+      if (!t) continue;
+      t.totalCorrect += r.correct;
+      if (weekResult.winnerIds.includes(r.userId)) t.weeklyWins += 1;
+    }
+    weeklyBreakdown.push({
+      week,
+      allGamesFinal: weekResult.allGamesFinal,
+      winnerIds: weekResult.winnerIds,
+      winnerNames: users
+        .filter((u) => weekResult.winnerIds.includes(u.id))
+        .map((u) => u.name),
+    });
+  }
+
+  const standings = Array.from(totals.values()).sort(
+    (a, b) => b.weeklyWins - a.weeklyWins || b.totalCorrect - a.totalCorrect
+  );
+
+  return { season, standings, weeklyBreakdown };
+}
+
+module.exports = { computeWeek, computeSeasonStandings };

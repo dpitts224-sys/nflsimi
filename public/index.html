@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NFL Pick 'Em</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🏈 NFL Pick&nbsp;'Em</div>
+    <div class="topbar-controls">
+      <select id="userSelect"></select>
+      <button id="adminBtn" class="ghost">Admin</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="week">This Week</button>
+    <button class="tab-btn" data-tab="results">Results</button>
+    <button class="tab-btn" data-tab="standings">Season Standings</button>
+    <button class="tab-btn" data-tab="admin" id="adminTabBtn" hidden>Admin</button>
+  </nav>
+
+  <main id="app"></main>
+
+  <div id="adminModal" class="modal hidden">
+    <div class="modal-box">
+      <h3>Admin login</h3>
+      <input id="adminPassword" type="password" placeholder="Admin password" />
+      <div class="modal-actions">
+        <button id="adminCancel" class="ghost">Cancel</button>
+        <button id="adminSubmit">Log in</button>
+      </div>
+      <p id="adminError" class="error"></p>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
