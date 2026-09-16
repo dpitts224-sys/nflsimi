@@ -2,13 +2,16 @@ const { db } = require('./db');
 
 // Computes the weekly results: each user's correct-pick count, their MNF
 // tiebreaker guess, and who won the week (most correct picks, ties broken by
-// closeness to the actual Monday Night combined score).
-function computeWeek(season, week) {
+// closeness to the actual Monday Night combined score). Scoped to one
+// group - games are shared globally, but players and picks are not.
+function computeWeek(groupId, season, week) {
   const games = db
     .prepare('SELECT * FROM games WHERE season = ? AND week = ? ORDER BY kickoff ASC')
     .all(season, week);
 
-  const users = db.prepare('SELECT id, name FROM users ORDER BY name COLLATE NOCASE').all();
+  const users = db
+    .prepare('SELECT id, name FROM users WHERE group_id = ? ORDER BY name COLLATE NOCASE')
+    .all(groupId);
   const finalGames = games.filter((g) => g.status === 'final');
   const mnfGame = games.find((g) => g.is_mnf === 1);
   const mnfFinal = mnfGame && mnfGame.status === 'final';
@@ -18,13 +21,18 @@ function computeWeek(season, week) {
     .prepare(
       `SELECT p.*, g.winner_abbr, g.status FROM picks p
        JOIN games g ON g.id = p.game_id
-       WHERE g.season = ? AND g.week = ?`
+       JOIN users u ON u.id = p.user_id
+       WHERE g.season = ? AND g.week = ? AND u.group_id = ?`
     )
-    .all(season, week);
+    .all(season, week, groupId);
 
   const tiebreakers = db
-    .prepare('SELECT * FROM tiebreakers WHERE season = ? AND week = ?')
-    .all(season, week);
+    .prepare(
+      `SELECT t.* FROM tiebreakers t
+       JOIN users u ON u.id = t.user_id
+       WHERE t.season = ? AND t.week = ? AND u.group_id = ?`
+    )
+    .all(season, week, groupId);
 
   const results = users.map((user) => {
     const userPicks = allPicks.filter((p) => p.user_id === user.id);
@@ -78,20 +86,22 @@ function computeWeek(season, week) {
   };
 }
 
-function computeSeasonStandings(season) {
+function computeSeasonStandings(groupId, season) {
   const weeks = db
     .prepare('SELECT DISTINCT week FROM games WHERE season = ? ORDER BY week ASC')
     .all(season)
     .map((r) => r.week);
 
-  const users = db.prepare('SELECT id, name FROM users ORDER BY name COLLATE NOCASE').all();
+  const users = db
+    .prepare('SELECT id, name FROM users WHERE group_id = ? ORDER BY name COLLATE NOCASE')
+    .all(groupId);
   const totals = new Map(
     users.map((u) => [u.id, { userId: u.id, name: u.name, weeklyWins: 0, totalCorrect: 0 }])
   );
 
   const weeklyBreakdown = [];
   for (const week of weeks) {
-    const weekResult = computeWeek(season, week);
+    const weekResult = computeWeek(groupId, season, week);
     for (const r of weekResult.results) {
       const t = totals.get(r.userId);
       if (!t) continue;
@@ -118,21 +128,28 @@ function computeSeasonStandings(season) {
 // Full pick matrix for the "Winner Board" - every player's pick on every
 // game, plus their running correct count. Callers must only expose this
 // once the week is locked (see isWeekLocked in db.js).
-function computeBoard(season, week) {
+function computeBoard(groupId, season, week) {
   const games = db
     .prepare('SELECT * FROM games WHERE season = ? AND week = ? ORDER BY kickoff ASC')
     .all(season, week);
-  const users = db.prepare('SELECT id, name FROM users ORDER BY name COLLATE NOCASE').all();
+  const users = db
+    .prepare('SELECT id, name FROM users WHERE group_id = ? ORDER BY name COLLATE NOCASE')
+    .all(groupId);
   const picks = db
     .prepare(
       `SELECT p.user_id, p.game_id, p.picked_abbr FROM picks p
        JOIN games g ON g.id = p.game_id
-       WHERE g.season = ? AND g.week = ?`
+       JOIN users u ON u.id = p.user_id
+       WHERE g.season = ? AND g.week = ? AND u.group_id = ?`
     )
-    .all(season, week);
+    .all(season, week, groupId);
   const tiebreakers = db
-    .prepare('SELECT user_id, guess_points FROM tiebreakers WHERE season = ? AND week = ?')
-    .all(season, week);
+    .prepare(
+      `SELECT t.user_id, t.guess_points FROM tiebreakers t
+       JOIN users u ON u.id = t.user_id
+       WHERE t.season = ? AND t.week = ? AND u.group_id = ?`
+    )
+    .all(season, week, groupId);
 
   const rows = users.map((user) => {
     const userPicks = {};

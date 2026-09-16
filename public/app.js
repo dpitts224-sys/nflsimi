@@ -1,11 +1,15 @@
 const state = {
+  groupCode: localStorage.getItem('pickem_group_code') || null,
+  groupName: null,
   season: null,
   week: null,
   buyIn: 0,
   users: [],
-  userId: Number(localStorage.getItem('pickem_user_id')) || null,
-  adminPassword: sessionStorage.getItem('pickem_admin_password') || null,
+  userId: null,
+  adminPassword: null,
   tab: 'week',
+  eventSource: null,
+  gateMode: 'join', // 'join' | 'create'
 };
 
 const app = document.getElementById('app');
@@ -18,6 +22,10 @@ async function api(path, opts = {}) {
   return data;
 }
 
+function groupApi(path, opts) {
+  return api(`/api/groups/${encodeURIComponent(state.groupCode)}${path}`, opts);
+}
+
 function adminHeaders() {
   return state.adminPassword ? { 'x-admin-password': state.adminPassword } : {};
 }
@@ -28,68 +36,259 @@ function fmtKickoff(iso) {
   });
 }
 
-// ---------- bootstrap ----------
-async function init() {
-  await refreshUsers();
-  await refreshState();
-  bindTopbar();
-  bindTabs();
-  bindAdminModal();
-  bindLiveUpdates();
-  if (state.adminPassword) document.getElementById('adminTabBtn').hidden = false;
-  render();
-}
-
-// Live updates via Server-Sent Events: whenever anyone picks, syncs the
-// schedule, or changes settings, every open browser re-renders its current
-// tab automatically - no manual refresh needed.
-function bindLiveUpdates() {
-  if (typeof EventSource === 'undefined') return;
-  const dot = document.getElementById('liveDot');
-  const es = new EventSource('/api/stream');
-  es.addEventListener('open', () => { if (dot) dot.hidden = false; });
-  es.addEventListener('error', () => { if (dot) dot.hidden = true; });
-  es.addEventListener('update', () => render());
-}
-
-async function refreshState() {
-  const s = await api('/api/state');
-  state.season = s.season;
-  state.week = s.week;
-  state.buyIn = s.buyIn;
-}
-
-async function refreshUsers() {
-  state.users = await api('/api/users');
-  const sel = document.getElementById('userSelect');
-  sel.innerHTML =
-    '<option value="">Who are you?</option>' +
-    state.users.map((u) => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join('');
-  if (state.userId) sel.value = state.userId;
-}
-
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
 }
 
+function userStorageKey(code) { return `pickem_user_${code}`; }
+function adminStorageKey(code) { return `pickem_admin_${code}`; }
+
+// ---------- bootstrap ----------
+async function init() {
+  bindGateForms();
+  bindTopbar();
+  bindTabs();
+  bindAdminModal();
+  bindJoinModal();
+
+  if (state.groupCode) {
+    const ok = await enterGroup(state.groupCode, { skipHistoryUpdate: true });
+    if (!ok) return renderGate();
+  } else {
+    renderGate();
+  }
+}
+
+// Loads a group by code, restores any saved identity for it, and switches
+// the UI into the main app. Returns false (and leaves the gate showing) if
+// the code doesn't exist.
+async function enterGroup(code, opts = {}) {
+  let info;
+  try {
+    info = await api(`/api/groups/${encodeURIComponent(code)}`);
+  } catch (err) {
+    localStorage.removeItem('pickem_group_code');
+    return false;
+  }
+
+  state.groupCode = info.code;
+  state.groupName = info.name;
+  state.season = info.season;
+  state.week = info.week;
+  state.buyIn = info.buyIn;
+  localStorage.setItem('pickem_group_code', state.groupCode);
+
+  const savedAdmin = sessionStorage.getItem(adminStorageKey(state.groupCode));
+  state.adminPassword = savedAdmin || null;
+
+  await refreshUsers();
+
+  const saved = JSON.parse(localStorage.getItem(userStorageKey(state.groupCode)) || 'null');
+  state.userId = saved && state.users.some((u) => u.id === saved.id) ? saved.id : null;
+
+  connectLiveUpdates();
+  showMainApp();
+
+  if (!state.userId) {
+    openJoinModal({ dismissible: false });
+  }
+
+  document.getElementById('adminTabBtn').hidden = !state.adminPassword;
+  render();
+  return true;
+}
+
+function showMainApp() {
+  document.getElementById('topbarControls').hidden = false;
+  document.getElementById('tabsNav').hidden = false;
+  const badge = document.getElementById('groupBadge');
+  badge.innerHTML = `${escapeHtml(state.groupName)} <span class="code">${escapeHtml(state.groupCode)}</span>`;
+  populateUserSelect();
+}
+
+function leaveGroup() {
+  if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+  localStorage.removeItem('pickem_group_code');
+  state.groupCode = null;
+  state.groupName = null;
+  state.userId = null;
+  state.adminPassword = null;
+  document.getElementById('topbarControls').hidden = true;
+  document.getElementById('tabsNav').hidden = true;
+  document.getElementById('adminTabBtn').hidden = true;
+  state.tab = 'week';
+  document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === 'week'));
+  renderGate();
+}
+
+// ---------- group gate (join / create) ----------
+function renderGate() {
+  if (state.gateMode === 'create') {
+    app.innerHTML = `
+      <div class="gate-wrap">
+        <div class="gate-title">Create a group</div>
+        <div class="gate-subtitle">You'll get a code to share with your friends.</div>
+        <div class="card gate-card">
+          <label>Group name
+            <input id="gateGroupName" type="text" placeholder="e.g. Dad's Pick 'Em" maxlength="60" />
+          </label>
+          <label>Admin password
+            <input id="gateAdminPassword" type="password" placeholder="Only you should know this" />
+          </label>
+          <span class="muted" style="font-size:0.8rem">You'll use this password to sync each week's games and manage players.</span>
+          <button id="gateCreateSubmit">Create group</button>
+          <p id="gateError" class="error"></p>
+        </div>
+        <div class="gate-toggle">
+          Already have a code? <button id="gateToJoin">Join a group instead</button>
+        </div>
+      </div>
+    `;
+  } else {
+    app.innerHTML = `
+      <div class="gate-wrap">
+        <div class="gate-title">🏈 NFL Pick 'Em</div>
+        <div class="gate-subtitle">Enter your group's code to join in.</div>
+        <div class="card gate-card">
+          <label>Group code
+            <input id="gateCodeInput" type="text" placeholder="e.g. AB3XQZ" maxlength="6" style="text-transform:uppercase;letter-spacing:0.1em;font-weight:700" />
+          </label>
+          <button id="gateJoinSubmit">Join group</button>
+          <p id="gateError" class="error"></p>
+        </div>
+        <div class="gate-toggle">
+          Starting a new pool? <button id="gateToCreate">Create a group</button>
+        </div>
+      </div>
+    `;
+  }
+  bindGateForms();
+}
+
+function bindGateForms() {
+  const toCreate = document.getElementById('gateToCreate');
+  if (toCreate) toCreate.addEventListener('click', () => { state.gateMode = 'create'; renderGate(); });
+  const toJoin = document.getElementById('gateToJoin');
+  if (toJoin) toJoin.addEventListener('click', () => { state.gateMode = 'join'; renderGate(); });
+
+  const joinBtn = document.getElementById('gateJoinSubmit');
+  if (joinBtn) {
+    joinBtn.addEventListener('click', async () => {
+      const code = document.getElementById('gateCodeInput').value.trim().toUpperCase();
+      if (!code) return;
+      const ok = await enterGroup(code);
+      if (!ok) document.getElementById('gateError').textContent = "That group code doesn't exist";
+    });
+  }
+
+  const createBtn = document.getElementById('gateCreateSubmit');
+  if (createBtn) {
+    createBtn.addEventListener('click', async () => {
+      const name = document.getElementById('gateGroupName').value.trim();
+      const password = document.getElementById('gateAdminPassword').value;
+      try {
+        const info = await api('/api/groups', {
+          method: 'POST',
+          body: JSON.stringify({ name, adminPassword: password }),
+        });
+        state.adminPassword = password;
+        sessionStorage.setItem(adminStorageKey(info.code), password);
+        await enterGroup(info.code);
+        alert(`Your group code is ${info.code} - share it with your friends so they can join!`);
+      } catch (err) {
+        document.getElementById('gateError').textContent = err.message;
+      }
+    });
+  }
+}
+
+// ---------- live updates ----------
+function connectLiveUpdates() {
+  if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+  if (typeof EventSource === 'undefined') return;
+  const dot = document.getElementById('liveDot');
+  const es = new EventSource(`/api/groups/${encodeURIComponent(state.groupCode)}/stream`);
+  es.addEventListener('open', () => { if (dot) dot.hidden = false; });
+  es.addEventListener('error', () => { if (dot) dot.hidden = true; });
+  es.addEventListener('update', () => render());
+  state.eventSource = es;
+}
+
+// ---------- users ----------
+async function refreshUsers() {
+  state.users = await groupApi('/users');
+  populateUserSelect();
+}
+
+function populateUserSelect() {
+  const sel = document.getElementById('userSelect');
+  if (!sel) return;
+  sel.innerHTML =
+    state.users.map((u) => `<option value="${u.id}">${escapeHtml(u.name)}</option>`).join('') +
+    `<option value="__new__">+ Add my name</option>`;
+  if (state.userId) sel.value = state.userId;
+  else sel.value = '__new__';
+}
+
+// ---------- join modal (self-service "add my name") ----------
+function openJoinModal({ dismissible = true } = {}) {
+  const modal = document.getElementById('joinModal');
+  document.getElementById('joinNameInput').value = '';
+  document.getElementById('joinError').textContent = '';
+  document.getElementById('joinCancel').hidden = !dismissible;
+  modal.classList.remove('hidden');
+  document.getElementById('joinNameInput').focus();
+}
+
+function bindJoinModal() {
+  const modal = document.getElementById('joinModal');
+  document.getElementById('joinCancel').addEventListener('click', () => {
+    modal.classList.add('hidden');
+    populateUserSelect();
+  });
+  document.getElementById('joinSubmit').addEventListener('click', async () => {
+    const name = document.getElementById('joinNameInput').value.trim();
+    if (!name) return;
+    try {
+      const user = await groupApi('/users', { method: 'POST', body: JSON.stringify({ name }) });
+      state.userId = user.id;
+      localStorage.setItem(userStorageKey(state.groupCode), JSON.stringify(user));
+      await refreshUsers();
+      modal.classList.add('hidden');
+      render();
+    } catch (err) {
+      document.getElementById('joinError').textContent = err.message;
+    }
+  });
+}
+
 function bindTopbar() {
   document.getElementById('userSelect').addEventListener('change', (e) => {
-    state.userId = Number(e.target.value) || null;
-    if (state.userId) localStorage.setItem('pickem_user_id', state.userId);
-    else localStorage.removeItem('pickem_user_id');
+    if (e.target.value === '__new__') {
+      openJoinModal({ dismissible: true });
+      return;
+    }
+    state.userId = Number(e.target.value);
+    const user = state.users.find((u) => u.id === state.userId);
+    if (user) localStorage.setItem(userStorageKey(state.groupCode), JSON.stringify(user));
     render();
   });
   document.getElementById('adminBtn').addEventListener('click', () => {
     if (state.adminPassword) {
       state.adminPassword = null;
-      sessionStorage.removeItem('pickem_admin_password');
+      sessionStorage.removeItem(adminStorageKey(state.groupCode));
       document.getElementById('adminTabBtn').hidden = true;
       if (state.tab === 'admin') switchTab('week');
       render();
     } else {
       document.getElementById('adminModal').classList.remove('hidden');
+    }
+  });
+  document.getElementById('leaveGroupBtn').addEventListener('click', () => {
+    if (confirm('Switch to a different group? You can rejoin this one later with its code.')) {
+      leaveGroup();
     }
   });
 }
@@ -100,9 +299,9 @@ function bindAdminModal() {
   document.getElementById('adminSubmit').addEventListener('click', async () => {
     const pw = document.getElementById('adminPassword').value;
     try {
-      await api('/api/admin/login', { method: 'POST', body: JSON.stringify({ password: pw }) });
+      await groupApi('/login', { method: 'POST', body: JSON.stringify({ password: pw }) });
       state.adminPassword = pw;
-      sessionStorage.setItem('pickem_admin_password', pw);
+      sessionStorage.setItem(adminStorageKey(state.groupCode), pw);
       document.getElementById('adminTabBtn').hidden = false;
       document.getElementById('adminError').textContent = '';
       document.getElementById('adminPassword').value = '';
@@ -128,6 +327,7 @@ function switchTab(tab) {
 
 // ---------- rendering ----------
 async function render() {
+  if (!state.groupCode) return renderGate();
   if (state.tab === 'week') return renderWeekTab();
   if (state.tab === 'board') return renderBoardTab();
   if (state.tab === 'results') return renderResultsTab();
@@ -139,13 +339,13 @@ async function renderWeekTab() {
   app.innerHTML = '<p class="empty-state">Loading…</p>';
   const { season, week } = state;
   const [games, picks, tiebreakers] = await Promise.all([
-    api(`/api/weeks/${season}/${week}/games`),
-    api(`/api/weeks/${season}/${week}/picks?userId=${state.userId || ''}`),
-    api(`/api/weeks/${season}/${week}/tiebreakers?userId=${state.userId || ''}`),
+    groupApi(`/weeks/${season}/${week}/games`),
+    groupApi(`/weeks/${season}/${week}/picks?userId=${state.userId || ''}`),
+    groupApi(`/weeks/${season}/${week}/tiebreakers?userId=${state.userId || ''}`),
   ]);
 
   if (games.length === 0) {
-    app.innerHTML = `<p class="empty-state">No games loaded yet for Season ${season}, Week ${week}.<br/>Ask your admin to sync this week from the Admin tab.</p>`;
+    app.innerHTML = `<p class="empty-state">No games loaded yet for Season ${season}, Week ${week}.<br/>Ask your group's admin to sync this week from the Admin tab.</p>`;
     return;
   }
 
@@ -157,7 +357,7 @@ async function renderWeekTab() {
     const others = otherPicksFor(g.id);
     const isFinal = g.status === 'final';
 
-    const teamButton = (abbr, teamName, score, isHome) => {
+    const teamButton = (abbr, teamName, score) => {
       const selected = mine?.pickedAbbr === abbr;
       let cls = 'team-btn';
       if (selected) cls += ' selected';
@@ -185,8 +385,8 @@ async function renderWeekTab() {
           ${g.is_mnf ? '<span class="mnf-badge">MNF</span>' : ''}
         </div>
         <div class="matchup">
-          ${teamButton(g.away_abbr, g.away_team, g.away_score, false)}
-          ${teamButton(g.home_abbr, g.home_team, g.home_score, true)}
+          ${teamButton(g.away_abbr, g.away_team, g.away_score)}
+          ${teamButton(g.home_abbr, g.home_team, g.home_score)}
         </div>
         ${g.locked ? `<div class="locked-note">🔒 Locked${
           g.status === 'final' ? ' — final' : g.status === 'in_progress' ? ' — in progress' : ' — not started yet'
@@ -227,7 +427,7 @@ async function renderWeekTab() {
       <div><strong>Season ${season} — Week ${week}</strong></div>
       <span class="muted">${lockNote}</span>
     </div>
-    ${!state.userId ? '<p class="empty-state">Pick your name above to make picks</p>' : ''}
+    ${!state.userId ? '<p class="empty-state">Add your name above to make picks</p>' : ''}
     ${cards.join('')}
     ${tiebreakerHtml}
   `;
@@ -235,7 +435,7 @@ async function renderWeekTab() {
   app.querySelectorAll('.team-btn[data-game]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       try {
-        await api('/api/picks', {
+        await groupApi('/picks', {
           method: 'POST',
           body: JSON.stringify({
             userId: state.userId,
@@ -256,7 +456,7 @@ async function renderWeekTab() {
       const val = Number(document.getElementById('tiebreakerInput').value);
       if (!Number.isFinite(val) || val < 0) return alert('Enter a valid number of points');
       try {
-        await api('/api/tiebreakers', {
+        await groupApi('/tiebreakers', {
           method: 'POST',
           body: JSON.stringify({ userId: state.userId, season, week, guessPoints: val }),
         });
@@ -271,7 +471,7 @@ async function renderWeekTab() {
 async function renderBoardTab() {
   app.innerHTML = '<p class="empty-state">Loading…</p>';
   const { season, week } = state;
-  const board = await api(`/api/weeks/${season}/${week}/board`);
+  const board = await groupApi(`/weeks/${season}/${week}/board`);
 
   if (!board.locked) {
     const when = board.lockTime ? fmtKickoff(board.lockTime) : null;
@@ -341,7 +541,7 @@ async function renderBoardTab() {
 async function renderResultsTab() {
   app.innerHTML = '<p class="empty-state">Loading…</p>';
   const { season, week } = state;
-  const r = await api(`/api/weeks/${season}/${week}/results`);
+  const r = await groupApi(`/weeks/${season}/${week}/results`);
 
   if (r.games.length === 0) {
     app.innerHTML = '<p class="empty-state">No games for this week yet.</p>';
@@ -383,7 +583,7 @@ async function renderResultsTab() {
 
 async function renderStandingsTab() {
   app.innerHTML = '<p class="empty-state">Loading…</p>';
-  const s = await api(`/api/standings/${state.season}`);
+  const s = await groupApi(`/standings/${state.season}`);
 
   if (s.standings.length === 0) {
     app.innerHTML = '<p class="empty-state">No standings yet — add players and sync a week first.</p>';
@@ -426,6 +626,14 @@ async function renderStandingsTab() {
 async function renderAdminTab() {
   app.innerHTML = `
     <div class="card admin-section">
+      <strong>Group</strong>
+      <div class="admin-row">
+        <span class="muted">Share this code so friends can join:</span>
+        <span class="group-badge">${escapeHtml(state.groupCode)}</span>
+      </div>
+    </div>
+
+    <div class="card admin-section">
       <strong>Season / Week</strong>
       <div class="admin-row">
         <label>Season <input id="seasonInput" type="number" value="${state.season}" style="width:100px" /></label>
@@ -444,16 +652,13 @@ async function renderAdminTab() {
       <div class="admin-row" id="userChips">
         ${state.users.map((u) => `<span class="user-chip">${escapeHtml(u.name)} <button class="small ghost" data-remove="${u.id}">✕</button></span>`).join('')}
       </div>
-      <div class="admin-row">
-        <input id="newUserName" placeholder="Add a player's name" />
-        <button id="addUserBtn">Add player</button>
-      </div>
+      <span class="muted" style="font-size:0.8rem">Players usually add themselves from the top bar - use this only to remove someone.</span>
     </div>
   `;
 
   document.getElementById('saveStateBtn').addEventListener('click', async () => {
     try {
-      await api('/api/admin/state', {
+      await groupApi('/state', {
         method: 'POST',
         headers: adminHeaders(),
         body: JSON.stringify({
@@ -462,7 +667,10 @@ async function renderAdminTab() {
           buyIn: Number(document.getElementById('buyInInput').value),
         }),
       });
-      await refreshState();
+      const info = await api(`/api/groups/${encodeURIComponent(state.groupCode)}`);
+      state.season = info.season;
+      state.week = info.week;
+      state.buyIn = info.buyIn;
       render();
     } catch (err) {
       alert(err.message);
@@ -473,7 +681,7 @@ async function renderAdminTab() {
     const status = document.getElementById('syncStatus');
     status.textContent = 'Syncing…';
     try {
-      const r = await api(`/api/admin/weeks/${state.season}/${state.week}/sync`, {
+      const r = await groupApi(`/admin/weeks/${state.season}/${state.week}/sync`, {
         method: 'POST',
         headers: adminHeaders(),
         body: JSON.stringify({}),
@@ -484,27 +692,10 @@ async function renderAdminTab() {
     }
   });
 
-  document.getElementById('addUserBtn').addEventListener('click', async () => {
-    const input = document.getElementById('newUserName');
-    if (!input.value.trim()) return;
-    try {
-      await api('/api/admin/users', {
-        method: 'POST',
-        headers: adminHeaders(),
-        body: JSON.stringify({ name: input.value.trim() }),
-      });
-      input.value = '';
-      await refreshUsers();
-      render();
-    } catch (err) {
-      alert(err.message);
-    }
-  });
-
   document.querySelectorAll('[data-remove]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       if (!confirm('Remove this player and all of their picks?')) return;
-      await api(`/api/admin/users/${btn.dataset.remove}`, { method: 'DELETE', headers: adminHeaders() });
+      await groupApi(`/users/${btn.dataset.remove}`, { method: 'DELETE', headers: adminHeaders() });
       await refreshUsers();
       render();
     });

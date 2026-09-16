@@ -6,66 +6,73 @@ guesses the combined total points of the Monday Night game as a tiebreaker,
 and the app automatically figures out who had the most correct picks (and
 who wins the week if there's a tie).
 
+The app supports many independent pools on one deployment: anyone can spin
+up a **group**, gets a short shareable **code**, and only people with that
+code see that group's players/picks/standings. Real NFL schedules and
+scores are shared across every group (no reason to duplicate public data),
+but everything else - who's playing, who picked what, the season standings
+- is scoped to your group alone.
+
 ## Features
 
+- **Self-service groups** — anyone visiting the site can create a group
+  (name + admin password) and gets back a 6-character code. Share that code
+  and a link to the site with your friends.
+- **Self-service players, one sheet per name** — friends join by entering
+  the group code and typing their own name; no admin has to add them.
+  Each player has exactly one set of picks per week (enforced by the
+  database), and it's locked in — including the tiebreaker — the moment the
+  week's *first* game kicks off, not game-by-game. That means you can't
+  wait to see Sunday's early games before picking the late ones.
 - **Auto-loaded schedule & scores** — pulls each week's matchups and final
   scores from ESPN's public scoreboard, no manual data entry.
-- **Pick 'em, one sheet per player** — everyone picks their name and clicks a
-  winner for each game. Each player has exactly one set of picks per week
-  (enforced by the database, not just the UI), and it's locked in — including
-  the tiebreaker — the moment the week's *first* game kicks off, not
-  game-by-game. That means you can't wait to see Sunday's early games before
-  picking the late ones.
-- **Winner Board** — an optional shared view where everyone can see the
-  whole group's picks side-by-side, correct/incorrect highlighted as games
-  finish. It's only visible once the week is locked (so it can never leak an
-  unlocked pick), and it updates in real time for everyone watching — no
-  refresh needed — as people pick and as scores come in.
+- **Winner Board** — a shared, real-time view where everyone in the group
+  can see the whole group's picks side-by-side, correct/incorrect
+  highlighted as games finish. It's only visible once the week is locked
+  (so it can never leak an unlocked pick), and updates live for everyone
+  watching — no refresh needed — as people pick and as scores come in.
 - **Monday Night tiebreaker** — a dedicated box to guess the combined total
   points of the Monday night game; used to break ties on correct-pick count.
 - **Weekly results** — correct-pick counts per player, the week's winner(s),
   and an even pot split if you use a buy-in.
 - **Season standings** — cumulative weekly wins and total correct picks.
-- **Simple admin panel** — add/remove players, set the current season/week,
-  set the buy-in, and sync a week's games — protected by a single shared
-  admin password (no accounts needed for players).
+- **Simple admin panel** — set the current season/week and buy-in, sync a
+  week's games, and remove players — protected by that group's own admin
+  password (set when the group was created).
 
 ## Running it
 
-Requires Node.js 18+.
+Requires Node.js 18+ (22 recommended - see `.node-version`).
 
 ```bash
 npm install
-cp .env.example .env   # then edit ADMIN_PASSWORD in .env
 npm start
 ```
 
 Open http://localhost:3000. Data is stored in a local `data.sqlite` file
-(created automatically).
-
-To have it pick up your `.env` file, either use a process manager that
-loads it (pm2, systemd `EnvironmentFile=`, Docker `--env-file`, your host's
-"environment variables" settings) or export the vars manually:
-
-```bash
-ADMIN_PASSWORD=your-password PORT=3000 npm start
-```
+(created automatically). There's no environment variable to configure to
+get started - each group sets its own admin password when it's created.
 
 ## Weekly workflow
 
-1. **Admin tab**: set the current Season/Week, click **"Sync this week from
-   ESPN"** to pull in that week's games (the Monday Night game is detected
-   automatically).
-2. Share the link with the group. Everyone picks their name from the
-   dropdown in the top bar and clicks a winner for each game, plus fills in
-   their Monday Night total-points guess — before the week's first game
-   kicks off, since that's when everything locks.
-3. Once locked, anyone can open the **Winner Board** tab to see the whole
-   group's picks together, live.
-4. As games finish, re-sync the week (Admin tab) to pull final scores —
+1. Whoever's running the pool opens the site, clicks **"Create a group"**,
+   names it, and sets an admin password. They get back a short code (e.g.
+   `AB3XQZ`) - **share that code plus the site link** with the group.
+2. Everyone else opens the link, enters the code, and types their own name
+   to join - no admin setup needed per player.
+3. **Admin tab** (the creator is logged in automatically; anyone else can
+   log in with the group's admin password): set the current Season/Week,
+   click **"Sync this week from ESPN"** to pull in that week's games (the
+   Monday Night game is detected automatically).
+4. Everyone clicks a winner for each game and fills in their Monday Night
+   total-points guess — before the week's first game kicks off, since
+   that's when everything locks.
+5. Once locked, anyone in the group can open the **Winner Board** tab to
+   see the whole group's picks together, live.
+6. As games finish, re-sync the week (Admin tab) to pull final scores —
    the **Results** tab and the **Winner Board** update automatically:
    correct-pick counts, the week's winner(s), and the pot split.
-5. The **Season Standings** tab tracks weekly wins and total correct picks
+7. The **Season Standings** tab tracks weekly wins and total correct picks
    across the whole season.
 
 Tie-breaking rule: the player(s) with the most correct picks wins the week.
@@ -82,12 +89,11 @@ This repo includes a `render.yaml` blueprint, so deploying is a few clicks:
 1. Click **Deploy to Render**:
    [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/dpitts224-sys/nflsimi/tree/claude/nfl-pick-em-simulator-0fwee9)
 2. Sign in to Render (or create a free account) and connect your GitHub —
-   Render will read `render.yaml` and pre-fill everything.
-3. When it asks for the `ADMIN_PASSWORD` environment variable, set it to
-   something only you know.
-4. Click **Apply** / **Create Web Service**. In a minute or two you'll get a
-   live URL like `https://nfl-pick-em-xxxx.onrender.com` — that's the link
-   to share with the group.
+   Render will read `render.yaml` and pre-fill everything (no environment
+   variables to set - each group's admin password is set in the app itself).
+3. Click **Apply** / **Create Web Service**. In a minute or two you'll get a
+   live URL like `https://nfl-pick-em-xxxx.onrender.com` — open it, create
+   your group, and share the link + your group's code with everyone.
 
 Two things worth knowing about Render's free tier:
 - The service **spins down after 15 minutes of no traffic** and takes a
@@ -102,8 +108,7 @@ Two things worth knowing about Render's free tier:
 
 If you'd rather not use the button, the manual steps are: on render.com,
 **New → Web Service**, connect the `dpitts224-sys/nflsimi` repo, build
-command `npm install`, start command `npm start`, add the `ADMIN_PASSWORD`
-env var.
+command `npm install`, start command `npm start`.
 
 ### Option B: your own always-on machine
 
@@ -115,17 +120,20 @@ nothing ever gets wiped.
 
 ### Option C: another host (Railway, Fly.io, etc.)
 
-Works the same way anywhere Node runs: point the host at this repo, set
-`ADMIN_PASSWORD`, build with `npm install`, start with `npm start`, and
-attach persistent storage if the platform supports it (needed for
-`data.sqlite` to survive restarts/redeploys long-term).
+Works the same way anywhere Node runs: point the host at this repo, build
+with `npm install`, start with `npm start`, and attach persistent storage
+if the platform supports it (needed for `data.sqlite` to survive
+restarts/redeploys long-term).
 
 ## Notes / things you may want to tweak
 
-- There's no per-player login/password — anyone with the link can select
-  any name from the dropdown and pick for them. That matches a low-stakes
-  friend group; if you want to lock that down, the easiest addition would
-  be a simple PIN per player.
+- Anyone who knows a group's code can join it and pick under any name -
+  there's no per-player password. That matches a low-stakes friend group;
+  a group's *admin* actions (sync, settings, removing players) do require
+  that group's admin password, set when the group was created.
+- Once someone's created or joined a group in their browser, reopening the
+  same link remembers their group and name (via localStorage) - "Switch
+  group" in the top bar clears that if they need to join a different pool.
 - The ESPN endpoint is a public, unauthenticated JSON API ESPN uses for
   their own scoreboard pages. It's not an official/documented API, so if
   ESPN ever changes its response shape the sync could need a small update
@@ -134,3 +142,7 @@ attach persistent storage if the platform supports it (needed for
   would need `seasontype=3` — easiest way to handle that today is passing
   `{"seasontype": 3}` in the sync request body (the Admin UI only exposes
   regular season sync, but the API supports it).
+- Upgrading from an older single-group version of this app migrates your
+  existing players/settings automatically into a "Migrated Group" the
+  first time it starts up (see `migrateLegacySingleGroupSchema` in
+  `server/db.js`) - check the server logs for its auto-generated code.
